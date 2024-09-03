@@ -34,7 +34,7 @@ In Open WebUI:
 
 <div align="center">
 	<p>
-		<img src="https://github.com/EtiennePerot/open-webui-code-execution/blob/master/res/functions.png?raw=true" alt="Models list"/>
+		<img src="https://github.com/EtiennePerot/open-webui-code-execution/blob/master/res/functions.png?raw=true" alt="Functions list"/>
 	</p>
 </div>
 
@@ -84,7 +84,7 @@ The tool needs to be enabled on a per-model basis.
 
 <div align="center">
 	<p>
-		<img src="https://github.com/EtiennePerot/open-webui-code-execution/blob/master/res/models.png?raw=true" alt="Models list"/>
+		<img src="https://github.com/EtiennePerot/open-webui-code-execution/blob/master/res/model.png?raw=true" alt="Models list"/>
 	</p>
 </div>
 
