@@ -264,9 +264,7 @@ class Sandbox:
             super().__init__(**kwargs)
             self._code = code
 
-        def __str__(
-            self,
-        ):
+        def __str__(self):
             super_str = super().__str__()
             full_code = self._code
             short_code = full_code.replace("\n", ";")

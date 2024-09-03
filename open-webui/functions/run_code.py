@@ -398,17 +398,19 @@ class Sandbox:
         Raised when the sandboxed code fails to run.
         This means the sandbox worked, but the code that ran within failed.
         """
+
         def __init__(self, code, **kwargs):
             super().__init__(**kwargs)
             self._code = code
-        def __str__(self, ):
+
+        def __str__(self):
             super_str = super().__str__()
             full_code = self._code
             short_code = full_code.replace("\n", ";")
             if len(short_code) >= 128:
                 short_code = short_code[:60] + "…" + short_code[-60:]
             if self.stderr:
-                lines = [l.strip() for l in self.stderr.split('\n') if l.strip()]
+                lines = [l.strip() for l in self.stderr.split("\n") if l.strip()]
                 if len(lines) >= 2:
                     first_line, last_line = lines[0], lines[-1]
                     return f"{first_line} […] {last_line} (`{short_code}`)\n{super_str}\n```\n{full_code}\n```"
