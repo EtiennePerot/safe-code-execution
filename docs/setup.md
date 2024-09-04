@@ -12,23 +12,24 @@ gVisor only runs on Linux. However, if you are running on Windows or OS X, you c
 
 If you run Open WebUI inside a container, you will need to adjust its settings to grant gVisor the necessary privileges to work. The code contains self-checks which will let you know if your setup needs work, but in general you will at minimum need to do the following:
 
-### Remove the default system call filter
+### The easy way: Run in `--privileged` mode
 
-* **Why**: This is necessary so that gVisor can create isolated namespaces via the [unshare(2) system call](https://www.man7.org/linux/man-pages/man2/unshare.2.html).
-* On **Docker**: Add `--security-opt=seccomp=unconfined` to `docker run`.
-* On **Kubernetes**: Set [`spec.securityContext.seccompProfile.type`](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#set-the-seccomp-profile-for-a-container) to `Unconfined`.
+Adding `--privileged=true` to `docker run` will remove all of Docker's security measures. This offers a similar profile as if you were running Open WebUI as root without a container. Code running as part of the code execution function/tool will still run in a gVisor sandbox. If this sounds OK for your needs (for example if this is a single-user instance and you trust Open WebUI's code), this is a quick way to get set up. Otherwise, read on for the hard way.
 
-### If you have **SELinux** enabled, set the `container_engine_t` label
+### The hard way
 
-* **Why**: The default SELinux label for containers (`container_t`) does not allow the creation of namespaces, which gVisor requires for isolation. The `container_engine_t` label allows this.
-* On **Docker**: Add `--security-opt=label=type:container_engine_t` to `docker run`.
-* On **Kubernetes**: Set [`spec.securityContext.seLinuxOptions.type`](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#assign-selinux-labels-to-a-container) to `container_engine_t`.
-
-### If wanting to use resource limiting, **mount `cgroupfs` as read-write**
-
-* **Why**: This is necessary so that gVisor can create child cgroups with memory usage limits.
-* On **Docker**: Add `--mount=type=bind,source=/sys/fs/cgroup,target=/sys/fs/cgroup,readonly=false` to `docker run`.
-* On **Kubernetes**: Add a [`hostPath` volume](https://kubernetes.io/docs/concepts/storage/volumes/#hostpath) with `path` set to `/sys/fs/cgroup`, then mount it in your container's `volumeMounts` with options `mountPath` set to `/sys/fs/cgroup` and `readOnly` set to `false`.
+* Remove the default **system call filter**:
+    * **Why**: This is necessary so that gVisor can create isolated namespaces via the [unshare(2) system call](https://www.man7.org/linux/man-pages/man2/unshare.2.html).
+    * On **Docker**: Add `--security-opt=seccomp=unconfined` to `docker run`.
+    * On **Kubernetes**: Set [`spec.securityContext.seccompProfile.type`](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#set-the-seccomp-profile-for-a-container) to `Unconfined`.
+* If you have **SELinux** enabled, set the `container_engine_t` label:
+    * **Why**: The default SELinux label for containers (`container_t`) does not allow the creation of namespaces, which gVisor requires for isolation. The `container_engine_t` label allows this.
+    * On **Docker**: Add `--security-opt=label=type:container_engine_t` to `docker run`.
+    * On **Kubernetes**: Set [`spec.securityContext.seLinuxOptions.type`](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#assign-selinux-labels-to-a-container) to `container_engine_t`.
+* If you want to use resource limiting, **mount `cgroupfs` as read-write**
+    * **Why**: This is necessary so that gVisor can create child cgroups with memory usage limits.
+    * On **Docker**: Add `--mount=type=bind,source=/sys/fs/cgroup,target=/sys/fs/cgroup,readonly=false` to `docker run`.
+    * On **Kubernetes**: Add a [`hostPath` volume](https://kubernetes.io/docs/concepts/storage/volumes/#hostpath) with `path` set to `/sys/fs/cgroup`, then mount it in your container's `volumeMounts` with options `mountPath` set to `/sys/fs/cgroup` and `readOnly` set to `false`.
 
 ## Self-test mode
 
