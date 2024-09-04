@@ -21,7 +21,9 @@ The **code execution function** shows up as a button under LLM-generated message
 
 ### Function: How to install
 
-In Open WebUI:
+First, [**set up Open WebUI for sandboxing**](docs/setup.md).
+
+Then, in Open WebUI:
 
 * Go to `Workspace` → `Functions`.
 * Click the `+`.
@@ -57,7 +59,9 @@ The **code execution tool** grants the LLM the ability to run code by itself. Th
 
 ### Tool: How to install
 
-In Open WebUI:
+First, [**set up Open WebUI for sandboxing**](docs/setup.md).
+
+Then, in Open WebUI:
 
 * Go to `Workspace` → `Tools`.
 * Click the `+`.
