@@ -17,7 +17,7 @@ You can do this the **easy way** (good for single-user setups) by running Open W
 <details>
 <summary>
 
-### The easy way: Run in `--privileged` mode
+### The easy way: Run Open WebUI in privileged mode
 
 </summary>
 
@@ -28,7 +28,7 @@ You can do this the **easy way** (good for single-user setups) by running Open W
 
 However, **code running as part of this code execution function/tool will still run in a secure gVisor sandbox** and cannot impact the host.
 
-This is adequate for single-user setups not exposed to the outside Internet, while still providing strong security against LLMs generating malicious code. However, if you are running a multi-user setup, or if you do not fully trust Open WebUI's code, or you the Open WebUI server's port is exposed to the outside Internet, you may want to harden it further. If so, **don't** set the `privileged` setting, and read on to the hard way instead.
+This is adequate for single-user setups not exposed to the outside Internet, while still providing strong security against LLMs generating malicious code. However, if you are running a multi-user setup, or if you do not fully trust Open WebUI's code, or the Open WebUI server's HTTP port is exposed to the outside Internet, you may want to harden it further. If so, **don't** set the `privileged` setting, and read on to the hard way instead.
 
 </details>
 
@@ -39,28 +39,28 @@ This is adequate for single-user setups not exposed to the outside Internet, whi
 
 </summary>
 
-Setting `--privileged=true` essentially removes all security measures from a container. The below is the minimal subset of changes that `--privileged=true` does that is still necessary for sandboxing.
+The below is the minimal subset of changes that `--privileged=true` does that is still necessary for sandboxing to work.
 
-* Remove the container's default **system call filter**:
+* Remove the container's default **system call filter** (`seccomp`):
     * On **Docker**: Add `--security-opt=seccomp=unconfined` to `docker run`.
     * On **Kubernetes**: Set [`spec.securityContext.seccompProfile.type`](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#set-the-seccomp-profile-for-a-container) to `Unconfined`.
-    * If you would like to use a specific seccomp profile rather than completely removing system call filter, you can use [Dangerzone's seccomp profile](https://github.com/freedomofpress/dangerzone/blob/main/share/seccomp.gvisor.json) which is tuned to allow gVisor system calls through.
+    * If you would like to use a specific seccomp profile rather than running without system call filtering, you can use [Dangerzone's seccomp profile](https://github.com/freedomofpress/dangerzone/blob/main/share/seccomp.gvisor.json) which is tuned to allow gVisor system calls through.
     * **Why**: By default, some system calls are blocked by the [container runtime's default system call filter](https://docs.docker.com/engine/security/seccomp/#significant-syscalls-blocked-by-the-default-profile). The use of these system calls **enhances security when running subcontainers**, but they are blocked by default because most containerized applications don't ever *need* to create subcontainers. gVisor, however, does. Specifically, gVisor needs to:
         * ... create isolated namespaces using the [`unshare(2)` system call](https://www.man7.org/linux/man-pages/man2/unshare.2.html)
         * ... create isolated chroots via the [`mount(2)` system call](https://www.man7.org/linux/man-pages/man2/mount.2.html)
         * ... `pivot_root` into these roots via the [`pivot_root(2)` system call](https://www.man7.org/linux/man-pages/man2/pivot_root.2.html)
         * ... trace sandboxed processes to block their system calls from reaching the host Linux kernel using the [`ptrace(2)` system call](https://www.man7.org/linux/man-pages/man2/ptrace.2.html)
-* **Mount `cgroupfs` as writable**.
+* **Mount `cgroupfs` as writable**:
     * On **Docker**: Add `--mount=type=bind,source=/sys/fs/cgroup,target=/sys/fs/cgroup,readonly=false` to `docker run`.
     * On **Kubernetes**: Add a [`hostPath` volume](https://kubernetes.io/docs/concepts/storage/volumes/#hostpath) with `path` set to `/sys/fs/cgroup`, then mount it in your container's `volumeMounts` with options `mountPath` set to `/sys/fs/cgroup` and `readOnly` set to `false`.
     * **Why**: This is needed so that gVisor can create child [cgroups](https://en.wikipedia.org/wiki/Cgroups), necessary to enforce per-sandbox memory usage limits.
-* **Set the `container_engine_t` label**:
+* **Set the `container_engine_t` SELinux label**:
     * On **Docker**: Add `--security-opt=label=type:container_engine_t` to `docker run`.
     * On **Kubernetes**: Set [`spec.securityContext.seLinuxOptions.type`](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#assign-selinux-labels-to-a-container) to `container_engine_t`.
     * **Why**: The default SELinux label for containers (`container_t`) does not allow the creation of namespaces, which gVisor requires for additional isolation . The `container_engine_t` label allows this.
     * If you don't have SELinux enabled, this setting does nothing and may be omitted.
 
-NOTE: Per bug reports, you may also need to set `--cgroupns=host` (see issue #2 for more details). This is temporary and should stop being required soon.
+NOTE: Per bug reports (see issue #2 and #3), you may also need to set `--cgroupns=host` (see issue #2 for more details). **This is temporary and should stop being required soon.**
 
 </details>
 
