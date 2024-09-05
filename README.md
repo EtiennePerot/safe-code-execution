@@ -34,16 +34,21 @@ Then, in Open WebUI:
 * Click the `Save` button.
 * Activate both toggles on the function you just created.
 
+<details>
+<summary>See screenshot</summary>
 <div align="center">
 	<p>
 		<img src="https://github.com/EtiennePerot/open-webui-code-execution/blob/master/res/functions.png?raw=true" alt="Functions list"/>
 	</p>
 </div>
+</details>
 
 ### Function: How to use
 
 Ask the model to generate code, then click the `Run code` button under the message to run it.
 
+<details>
+<summary>See screenshot</summary>
 <div align="center">
 	<p>
 		<img src="https://github.com/EtiennePerot/open-webui-code-execution/blob/master/res/code-execution-function.gif?raw=true" alt="Code execution tool"/>
@@ -52,6 +57,7 @@ Ask the model to generate code, then click the `Run code` button under the messa
 		<em>Code execution function used to inform the model of the current date, along with demo of gVisor sandboxing and internet reachability.</em>
 	</p>
 </div>
+</details>
 
 ## Code execution tool
 
@@ -71,11 +77,14 @@ Then, in Open WebUI:
     * Replace the **code section** with the contents of [`open-webui/tools/run_code.py`](https://raw.githubusercontent.com/EtiennePerot/open-webui-code-execution/master/open-webui/tools/run_code.py).
 * Click the `Save` button.
 
+<details>
+<summary>See screenshot</summary>
 <div align="center">
 	<p>
 		<img src="https://github.com/EtiennePerot/open-webui-code-execution/blob/master/res/tools.png?raw=true" alt="Tools list"/>
 	</p>
 </div>
+</details>
 
 ### Tool: How to enable for a model
 
@@ -86,16 +95,21 @@ The tool needs to be enabled on a per-model basis.
 * Under `Tools`, check the `Run Code` checkbox.
 * Click `Save & Update`.
 
+<details>
+<summary>See screenshot</summary>
 <div align="center">
 	<p>
 		<img src="https://github.com/EtiennePerot/open-webui-code-execution/blob/master/res/model.png?raw=true" alt="Models list"/>
 	</p>
 </div>
+</details>
 
 ### Tool: How to use
 
 When prompting the model, activate the "Run code" toggle on the message box. Then write your prompt.
 
+<details>
+<summary>See screenshot</summary>
 <div align="center">
 	<p>
 		<img src="https://github.com/EtiennePerot/open-webui-code-execution/blob/master/res/code-execution-tool.gif?raw=true" alt="Code execution tool"/>
@@ -104,3 +118,4 @@ When prompting the model, activate the "Run code" toggle on the message box. The
 		<em>Code execution tool looking up the date, retrieving a webpage that was not in its training set, and performing complex computations.</em>
 	</p>
 </div>
+</details>
