@@ -60,8 +60,6 @@ The below is the minimal subset of changes that `--privileged=true` does that is
     * **Why**: The default SELinux label for containers (`container_t`) does not allow the creation of namespaces, which gVisor requires for additional isolation . The `container_engine_t` label allows this.
     * If you don't have SELinux enabled, this setting does nothing and may be omitted.
 
-NOTE: Per bug reports (see issue #2 and #3), you may also need to set `--cgroupns=host` (see issue #2 for more details). **This is temporary and should stop being required soon.**
-
 </details>
 
 ## Self-test mode
@@ -77,19 +75,25 @@ $ git clone https://github.com/EtiennePerot/open-webui-code-execution && \
     --security-opt=label=type:container_engine_t \
     --mount=type=bind,source="$(pwd)/open-webui-code-execution",target=/selftest \
     ghcr.io/open-webui/open-webui:main \
-    python3 /selftest/open-webui/tools/run_code.py --use-sample-code
+    python3 /selftest/open-webui/tools/run_code.py --self_test
 ```
 
 If all goes well, you should see:
 
 ```
-Event: {'type': 'status', 'data': {'status': 'in_progress', 'description': 'Checking if environment supports sandboxing...', 'done': False}}
-Event: {'type': 'status', 'data': {'status': 'in_progress', 'description': 'Auto-installing gVisor...', 'done': False}}
-Event: {'type': 'status', 'data': {'status': 'in_progress', 'description': 'Initializing sandbox configuration...', 'done': False}}
-Event: {'type': 'status', 'data': {'status': 'in_progress', 'description': 'Setting up sandbox environment...', 'done': False}}
-Event: {'type': 'status', 'data': {'status': 'in_progress', 'description': 'Running Python code in gVisor sandbox...', 'done': False}}
-Event: {'type': 'status', 'data': {'status': 'complete', 'description': 'Python code executed successfully.', 'done': True}}
-{"status": "OK", "output": "Hello from the sandbox!\nCurrent date and time: 2024-09-04 05:06:26.021759\n[    0.000000] Starting gVisor... [...]"}
+⏳ Running self-test: simple_python
+✔ Self-test simple_python passed.
+⏳ Running self-test: simple_bash
+✔ Self-test simple_bash passed.
+⏳ Running self-test: bad_syntax_python
+✔ Self-test bad_syntax_python passed.
+⏳ Running self-test: bad_syntax_bash
+✔ Self-test bad_syntax_bash passed.
+⏳ Running self-test: long_running_code
+✔ Self-test long_running_code passed.
+⏳ Running self-test: ram_hog
+✔ Self-test ram_hog passed.
+✅ All self-tests passed, good go to!
 ```
 
 If you get an error, try to add the `--debug` flag at the very end of this command (i.e. as a `run_code.py` flag) for extra information, then file a bug.
@@ -107,6 +111,9 @@ The code execution tool and function have the following valves available:
 * **Auto Install**: Whether to automatically download and install gVisor if not present in the container.
   * If not installed, gVisor will be automatically installed in `/tmp`.
   * Useful for convenience, but should be disabled for production setups.
+* **Debug**: Whether to produce debug logs.
+  * This should never be enabled in production setups as it produces a lot of information that isn't necessary for regular use.
+  * **When filing a bug report**, please enable this valve, then reproduce the issue in a new chat session, then download the chat log (triple-dot menu → `Download` → `Export chat (.json)`) and attach it to the bug report.
 
 ## Optional: Pre-install gVisor
 
