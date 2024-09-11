@@ -14,13 +14,22 @@ license: Apache-2.0
 # of code in the LLM output, see here instead:
 # https://openwebui.com/f/etienneperot/run_code/
 # See https://github.com/EtiennePerot/open-webui-code-execution for more info.
-
-# Protip: You can test this tool manually outside of OpenWebUI by running it like this:
+# NOTE: If running Open WebUI in a container, you *need* to set up this container to allow sandboxed code execution.
+# Please read the docs here:
 #
-#   echo 'print("Hello world!")' | python3 run_code.py
+#   https://github.com/EtiennePerot/open-webui-code-execution/blob/master/README.md
+#
+# Protip: You can test this tool manually by running it as a Python script, like so:
+# (Run this inside the Open WebUI container)
+#
+#   python3 run_code.py --self_test
 #
 # This will simulate that OpenWebUI would do if it asked this tool to evaluate the Python code `print("Hello world!")`.
 # This can be useful when setting up this tool to verify that it works in your environment.
+# You can also use it for one-off code execution like this:
+#
+#   echo 'print("Hello world!")' | python3 run_code.py
+#
 
 import asyncio
 import argparse

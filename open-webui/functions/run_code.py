@@ -5,7 +5,7 @@ description: Run arbitrary Python or Bash code safely in a gVisor sandbox.
 author: EtiennePerot
 author_url: https://github.com/EtiennePerot/open-webui-code-execution
 funding_url: https://github.com/EtiennePerot/open-webui-code-execution
-version: 0.3.0
+version: 0.4.0
 license: Apache-2.0
 """
 
@@ -13,7 +13,11 @@ license: Apache-2.0
 # If you are looking for an OpenWebUI *tool* to allow the LLM to run its own code,
 # see here instead: https://openwebui.com/t/etienneperot/run_code/
 # See https://github.com/EtiennePerot/open-webui-code-execution for more info.
-
+# NOTE: If running Open WebUI in a container, you *need* to set up this container to allow sandboxed code execution.
+# Please read the docs here:
+#
+#   https://github.com/EtiennePerot/open-webui-code-execution/blob/master/README.md
+#
 # Protip: You can test this tool manually outside of OpenWebUI by running it like this:
 #
 #   echo 'print("Hello world!")' | python3 run_code.py

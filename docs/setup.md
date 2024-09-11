@@ -24,9 +24,7 @@ You can do this the **easy way** (good for single-user setups) by running Open W
 * On **Docker**: Add `--privileged=true` to `docker run`.
 * On **Kubernetes**: Set `spec.securityContext.privileged` to `true`.
 
-**This will remove all security measures** from the Open WebUI container. From a security perspective, this is roughly equivalent to running the Open WebUI server as root outside of a container on the host machine.
-
-However, **code running as part of this code execution function/tool will still run in a secure gVisor sandbox** and cannot impact the host.
+**This will remove all security measures** from the Open WebUI container. From a security perspective, this is roughly equivalent to running the Open WebUI server as root outside of a container on the host machine. However, **code running as part of this code execution function/tool will still run in a secure gVisor sandbox** and cannot impact the host or the Open WebUI container.
 
 This is adequate for single-user setups not exposed to the outside Internet, while still providing strong security against LLMs generating malicious code. However, if you are running a multi-user setup, or if you do not fully trust Open WebUI's code, or the Open WebUI server's HTTP port is exposed to the outside Internet, you may want to harden it further. If so, **don't** set the `privileged` setting, and read on to the hard way instead.
 
@@ -53,7 +51,7 @@ The below is the minimal subset of changes that `--privileged=true` does that is
 * **Mount `cgroupfs` as writable**:
     * On **Docker**: Add `--mount=type=bind,source=/sys/fs/cgroup,target=/sys/fs/cgroup,readonly=false` to `docker run`.
     * On **Kubernetes**: Add a [`hostPath` volume](https://kubernetes.io/docs/concepts/storage/volumes/#hostpath) with `path` set to `/sys/fs/cgroup`, then mount it in your container's `volumeMounts` with options `mountPath` set to `/sys/fs/cgroup` and `readOnly` set to `false`.
-    * **Why**: This is needed so that gVisor can create child [cgroups](https://en.wikipedia.org/wiki/Cgroups), necessary to enforce per-sandbox memory usage limits.
+    * **Why**: This is needed so that gVisor can create child [cgroups](https://en.wikipedia.org/wiki/Cgroups), necessary to enforce per-sandbox resource usage limits.
 * **Set the `container_engine_t` SELinux label**:
     * On **Docker**: Add `--security-opt=label=type:container_engine_t` to `docker run`.
     * On **Kubernetes**: Set [`spec.securityContext.seLinuxOptions.type`](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#assign-selinux-labels-to-a-container) to `container_engine_t`.
