@@ -5,19 +5,21 @@ description: Run arbitrary Python or Bash code safely in a gVisor sandbox.
 author: EtiennePerot
 author_url: https://github.com/EtiennePerot/open-webui-code-execution
 funding_url: https://github.com/EtiennePerot/open-webui-code-execution
-version: 0.4.0
+version: 0.5.0
 license: Apache-2.0
 """
 
-# This is an OpenWebUI *tool*. It allows an LLM to generate and call code on its own.
-# If you are looking for an OpenWebUI *function* to allow you to manually execute blocks
-# of code in the LLM output, see here instead:
-# https://openwebui.com/f/etienneperot/run_code/
-# See https://github.com/EtiennePerot/open-webui-code-execution for more info.
 # NOTE: If running Open WebUI in a container, you *need* to set up this container to allow sandboxed code execution.
 # Please read the docs here:
 #
 #   https://github.com/EtiennePerot/open-webui-code-execution/blob/master/README.md
+#
+# This is an OpenWebUI *tool*. It allows an LLM to generate and call code on its own.
+# If you are looking for an OpenWebUI *function* to allow you to manually execute blocks
+# of code in the LLM output, see here instead:
+# https://openwebui.com/f/etienneperot/run_code/
+#
+# See https://github.com/EtiennePerot/open-webui-code-execution for more info.
 #
 # Protip: You can test this tool manually by running it as a Python script, like so:
 # (Run this inside the Open WebUI container)
@@ -181,9 +183,37 @@ class _Tools:
                     "done": done,
                 },
             )
+            if not done and len(description) <= 1024:
+                # Emit it again; Open WebUI does not seem to flush this reliably.
+                # Only do it for relatively small statuses; when debug mode is enabled,
+                # this can take up a lot of space.
+                await self._emit(
+                    "status",
+                    {
+                        "status": status,
+                        "description": description,
+                        "done": done,
+                    },
+                )
 
         async def fail(self, description="Unknown error"):
             await self.status(description=description, status="error", done=True)
+
+        async def code_execution_result(self, output):
+            await self._emit(
+                "code_execution_result",
+                {
+                    "output": output,
+                },
+            )
+
+        async def message(self, content):
+            await self._emit(
+                "message",
+                {
+                    "content": content,
+                },
+            )
 
     async def _run_code(
         self,
@@ -255,6 +285,7 @@ class _Tools:
                     networking_allowed=valves.NETWORKING_ALLOWED,
                     max_runtime_seconds=valves.MAX_RUNTIME_SECONDS,
                     max_ram_bytes=max_ram_bytes,
+                    persistent_home_dir=None,
                 )
 
                 await emitter.status(
@@ -366,7 +397,7 @@ class Sandbox:
     Sandbox manages a gVisor sandbox's lifecycle.
     """
 
-    # Set of supported programming langauges.
+    # Set of supported programming languages.
     LANGUAGE_PYTHON = "python"
     LANGUAGE_BASH = "bash"
     SUPPORTED_LANGUAGES = [LANGUAGE_PYTHON, LANGUAGE_BASH]
@@ -1596,6 +1627,7 @@ class Sandbox:
         networking_allowed: bool,
         max_runtime_seconds: int,
         max_ram_bytes: typing.Optional[int],
+        persistent_home_dir: typing.Optional[str],
     ):
         """
         Constructor.
@@ -1607,6 +1639,7 @@ class Sandbox:
         :param networking_allowed: Whether the code should be given access to the network.
         :param max_runtime_seconds: How long the code should be allowed to run, in seconds.
         :param max_ram_bytes: How many bytes of RAM the interpreter should be allowed to use, or `None` for no limit.
+        :param persistent_home_dir: Optional directory which will be mapped read-write to this real host directory.
         """
         self._init(
             {
@@ -1617,6 +1650,7 @@ class Sandbox:
                 "networking_allowed": networking_allowed,
                 "max_runtime_seconds": max_runtime_seconds,
                 "max_ram_bytes": max_ram_bytes,
+                "persistent_home_dir": persistent_home_dir,
             }
         )
 
@@ -1634,6 +1668,7 @@ class Sandbox:
         self._networking_allowed = self._settings["networking_allowed"]
         self._max_runtime_seconds = self._settings["max_runtime_seconds"]
         self._max_ram_bytes = self._settings["max_ram_bytes"]
+        self._persistent_home_dir = self._settings["persistent_home_dir"]
         self._sandboxed_command = None
         self._switcheroo = self._Switcheroo(
             log_path=os.path.join(self._logs_path, "switcheroo.txt"),
@@ -1659,6 +1694,11 @@ class Sandbox:
         os.chmod(self._sandbox_shared_path, mode=0o777, follow_symlinks=False)
         rootfs_path = os.path.join(self._tmp_dir, "rootfs")
         os.makedirs(rootfs_path, mode=0o755)
+        if self._persistent_home_dir is not None:
+            if not os.path.isdir(self._persistent_home_dir):
+                raise self.SandboxException(
+                    f"Persistent home directory {self._persistent_home_dir} does not exist"
+                )
 
         try:
             self._switcheroo.do()
@@ -1753,7 +1793,7 @@ class Sandbox:
                 }
             )
 
-        # Shared sandbox directory to propagate exit code.
+        # Shared sandbox directory to propagate exit code and persistent files.
         oci_config["mounts"].append(
             {
                 "type": "bind",
@@ -1762,6 +1802,15 @@ class Sandbox:
                 "options": ["rw"],
             }
         )
+        if self._persistent_home_dir is not None:
+            oci_config["mounts"].append(
+                {
+                    "type": "bind",
+                    "source": self._persistent_home_dir,
+                    "destination": "/sandbox/persistent",
+                    "options": ["rw"],
+                }
+            )
 
         # Sort mounts to ensure proper overlay order.
         oci_config["mounts"].sort(key=lambda m: m["destination"])
@@ -1776,7 +1825,16 @@ class Sandbox:
         self._sandboxed_command = [
             shutil.which("bash"),
             "-c",
-            f'echo OK > /sandbox/started; {interpreter_path} /dev/stdin; echo "$?" > /sandbox/exit_code && exit 0',
+            "; ".join(
+                (
+                    "echo OK > /sandbox/started",
+                    f"{interpreter_path} /dev/stdin",
+                    'echo "$?" > /sandbox/.pre_exit_code || exit 1',
+                    "if [[ -d /sandbox/persistent ]]; then cp -rd --one-file-system /home/user/. /sandbox/persistent/ || exit 2; fi",
+                    "mv /sandbox/.pre_exit_code /sandbox/exit_code || exit 3",
+                    "exit 0",
+                )
+            ),
         ]
 
         # Work around issue that gVisor does not preserve correct UID mappings when running as non-root user in the sandbox.
@@ -1807,7 +1865,6 @@ class Sandbox:
             self._setup_sandbox()
 
             network_mode = "host" if self._networking_allowed else "none"
-            debug_mode = "true" if self._debug else "false"
             runsc_argv = [
                 self.get_runsc_path(),
                 "--rootless=true",
@@ -1815,7 +1872,6 @@ class Sandbox:
                 f"--network={network_mode}",
                 f"--ignore-cgroups=true",  # We already took care of cgroups manually.
                 f"--root={self._runtime_root_path}",
-                f"--debug={debug_mode}",
                 f"--debug-log={self._logs_path}/",
                 "run",
                 f"--bundle={self._bundle_path}",
@@ -1857,7 +1913,7 @@ class Sandbox:
                 def process_log(filename, log_line):
                     if self._debug or (
                         log_line and log_line[0] in "WEF"
-                    ):  # [W]arning, [E]rror, [F]atal
+                    ):  # Warning, Error, Fatal
                         if filename not in logs:
                             logs[filename] = []
                         logs[filename].append(log_line)
