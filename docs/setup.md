@@ -52,6 +52,10 @@ The below is the minimal subset of changes that `--privileged=true` does that is
     * On **Docker**: Add `--mount=type=bind,source=/sys/fs/cgroup,target=/sys/fs/cgroup,readonly=false` to `docker run`.
     * On **Kubernetes**: Add a [`hostPath` volume](https://kubernetes.io/docs/concepts/storage/volumes/#hostpath) with `path` set to `/sys/fs/cgroup`, then mount it in your container's `volumeMounts` with options `mountPath` set to `/sys/fs/cgroup` and `readOnly` set to `false`.
     * **Why**: This is needed so that gVisor can create child [cgroups](https://en.wikipedia.org/wiki/Cgroups), necessary to enforce per-sandbox resource usage limits.
+* Remove the container's default **AppArmor profile**:
+    * On **Docker**: Add `--security-opt=apparmor=unconfined` to `docker run`.
+    * On **Kubernetes**: Set [`spec.securityContext.appArmorProfile.type`](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#set-the-apparmor-profile-for-a-container) to `Unconfined`.
+    * **Why**: By default, the capability to `mount` filesystems are blocked by the [container runtime's default AppArmor profile](https://github.com/moby/moby/blob/96ea6e0f9bed4b6936f4b266b207100812aec0b7/profiles/apparmor/template.go#L45). In order to sandbox itself, gVisor uses [`pivot_root(2)`](https://www.man7.org/linux/man-pages/man2/pivot_root.2.html)s to restrict its own view of the filesystem. For this to work, it needs a minimal set of mounted filesystems to exist in that view, hence needing to `mount` them there.
 * **Set the `container_engine_t` SELinux label**:
     * On **Docker**: Add `--security-opt=label=type:container_engine_t` to `docker run`.
     * On **Kubernetes**: Set [`spec.securityContext.seLinuxOptions.type`](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#assign-selinux-labels-to-a-container) to `container_engine_t`.
@@ -70,6 +74,7 @@ For example, here is a Docker invocation running the `run_code.py` script inside
 $ git clone https://github.com/EtiennePerot/open-webui-code-execution && \
   docker run --rm \
     --security-opt=seccomp=unconfined \
+    --security-opt=apparmor=unconfined \
     --security-opt=label=type:container_engine_t \
     --mount=type=bind,source="$(pwd)/open-webui-code-execution",target=/selftest \
     ghcr.io/open-webui/open-webui:main \
