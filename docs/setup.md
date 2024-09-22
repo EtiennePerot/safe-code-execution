@@ -76,6 +76,7 @@ $ git clone https://github.com/EtiennePerot/open-webui-code-execution && \
     --security-opt=seccomp=unconfined \
     --security-opt=apparmor=unconfined \
     --security-opt=label=type:container_engine_t \
+    --mount=type=bind,source=/sys/fs/cgroup,target=/sys/fs/cgroup,readonly=false \
     --mount=type=bind,source="$(pwd)/open-webui-code-execution",target=/selftest \
     ghcr.io/open-webui/open-webui:main \
     python3 /selftest/open-webui/tools/run_code.py --self_test
