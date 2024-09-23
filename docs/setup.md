@@ -139,7 +139,7 @@ FROM ghcr.io/open-webui/open-webui:main
 # Install `wget`.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y </dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y wget </dev/null
 
-# Install gVisor as `/usr/bin/runsc`.
+# Install gVisor at `/usr/bin/runsc`.
 RUN wget -O /tmp/runsc "https://storage.googleapis.com/gvisor/releases/release/latest/$(uname -m)/runsc" && \
     wget -O /tmp/runsc.sha512 "https://storage.googleapis.com/gvisor/releases/release/latest/$(uname -m)/runsc.sha512" && \
     cd /tmp && sha512sum -c runsc.sha512 && \
