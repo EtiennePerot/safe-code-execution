@@ -2068,7 +2068,7 @@ class Sandbox:
                 return  # We have at least one unobstructed procfs view.
         assert len(obstructed_procfs_mounts) > 0, "Logic error"
         raise cls.EnvironmentNeedsSetupException(
-            "procfs is obstructed; please mount a new procfs mount somewhere in the container, e.g. /proc2 (`--mount=type=bind,source=/proc,target=/proc2,readonly=false`)"
+            "procfs is obstructed; please mount a new procfs mount somewhere in the container, e.g. /proc2 (`--mount=type=bind,source=/proc,target=/proc2,readonly=false,bind-recursive=disabled`)"
         )
 
     @classmethod
