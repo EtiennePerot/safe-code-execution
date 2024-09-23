@@ -1,6 +1,8 @@
 # Open WebUI setup
 
-Both the code execution function and tool require the ability to run [gVisor](https://gvisor.dev) for secure sandboxing. Your Open WebUI instance needs to be set up to handle this.
+Both the code execution function and tool require the ability to run [gVisor](https://gvisor.dev) for secure sandboxing.
+
+Your Open WebUI instance needs to be set up to handle this.
 
 ## Supported environment
 
@@ -68,9 +70,32 @@ The below is the minimal subset of changes that `--privileged=true` does that is
 
 </details>
 
-## Self-test mode
+## **Optional**: Configuration: Set valves
+
+The code execution tool and function have the following valves available:
+
+* **Networking allowed**: Whether or not to let sandboxed code have access to the network.
+  * **Note**: If you are running Open WebUI on a LAN, this will expose your LAN.
+* **Max runtime**: The maximum number of time (in seconds) that sandboxed code will be allowed to run.
+  * Useful for multi-user setups to avoid denial-of-service, and to avoid running LLM-generated code that contains infinite loops forever.
+* **Max RAM**: The maximum amount of memory the sandboxed code will be allowed to use, in megabytes.
+  * Useful for multi-user setups to avoid denial-of-service.
+* **Auto Install**: Whether to automatically download and install gVisor if not present in the container.
+  * If not installed, gVisor will be automatically installed in `/tmp`.
+  * You can set the HTTPS proxy used for this download using the `HTTPS_PROXY` environment variable.
+  * Useful for convenience, but should be disabled for production setups. See below on how to pre-install gVisor.
+* **Debug**: Whether to produce debug logs.
+  * This should never be enabled in production setups as it produces a lot of information that isn't necessary for regular use.
+  * **When filing a bug report**, please enable this valve, then reproduce the issue in a new chat session, then download the chat log (triple-dot menu → `Download` → `Export chat (.json)`) and attach it to the bug report.
+
+<details>
+<summary>
+
+## **Optional**: Self-test mode
 
 To verify that your setup works, you can run the function and the tool in self-test mode using the `--self_test` flag.
+
+</summary>
 
 For example, here is a Docker invocation running the `run_code.py` script inside the Open WebUI container image with the above flags:
 
@@ -110,27 +135,17 @@ If all goes well, you should see:
 
 If you get an error, try to add the `--debug` to each `run_code.py` invocation for extra information, then file a bug.
 
-## Set valves
-
-The code execution tool and function have the following valves available:
-
-* **Networking allowed**: Whether or not to let sandboxed code have access to the network.
-  * **Note**: If you are running Open WebUI on a LAN, this will expose your LAN.
-* **Max runtime**: The maximum number of time (in seconds) that sandboxed code will be allowed to run.
-  * Useful for multi-user setups to avoid denial-of-service, and to avoid running LLM-generated code that contains infinite loops forever.
-* **Max RAM**: The maximum amount of memory the sandboxed code will be allowed to use, in megabytes.
-  * Useful for multi-user setups to avoid denial-of-service.
-* **Auto Install**: Whether to automatically download and install gVisor if not present in the container.
-  * If not installed, gVisor will be automatically installed in `/tmp`.
-  * You can set the HTTPS proxy used for this download using the `HTTPS_PROXY` environment variable.
-  * Useful for convenience, but should be disabled for production setups.
-* **Debug**: Whether to produce debug logs.
-  * This should never be enabled in production setups as it produces a lot of information that isn't necessary for regular use.
-  * **When filing a bug report**, please enable this valve, then reproduce the issue in a new chat session, then download the chat log (triple-dot menu → `Download` → `Export chat (.json)`) and attach it to the bug report.
+</details>
+<details>
+<summary>
 
 ## **Optional**: Pre-install gVisor
 
-To avoid the tool having to download and install gVisor on first run, you can **optionally** pre-install gVisor in your Open WebUI container image or environment. For example, here is a sample `Dockerfile` that extends the Open WebUI container image and pre-installs gVisor:
+To avoid the tool having to download and install gVisor on first run, you can **optionally** pre-install gVisor in your Open WebUI container image or environment.
+
+</summary>
+
+For example, here is a sample `Dockerfile` that extends the Open WebUI container image and pre-installs gVisor:
 
 ```Dockerfile
 # Note: Using this Dockerfile is optional.
@@ -146,6 +161,7 @@ RUN wget -O /tmp/runsc "https://storage.googleapis.com/gvisor/releases/release/l
     chmod 555 /tmp/runsc && rm /tmp/runsc.sha512 && mv /tmp/runsc /usr/bin/runsc
 ```
 
+</details>
 
 ## **Optional**: Lockdown for production setups
 
