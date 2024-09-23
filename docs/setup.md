@@ -52,6 +52,10 @@ The below is the minimal subset of changes that `--privileged=true` does that is
     * On **Docker**: Add `--mount=type=bind,source=/sys/fs/cgroup,target=/sys/fs/cgroup,readonly=false` to `docker run`.
     * On **Kubernetes**: Add a [`hostPath` volume](https://kubernetes.io/docs/concepts/storage/volumes/#hostpath) with `path` set to `/sys/fs/cgroup`, then mount it in your container's `volumeMounts` with options `mountPath` set to `/sys/fs/cgroup` and `readOnly` set to `false`.
     * **Why**: This is needed so that gVisor can create child [cgroups](https://en.wikipedia.org/wiki/Cgroups), necessary to enforce per-sandbox resource usage limits.
+* **Mount `procfs` at `/proc2`**:
+    * On **Docker**: Add `--mount=type=bind,source=/proc,target=/proc2,readonly=false,bind-recursive=disabled` to `docker run`.
+    * On **Kubernetes**: Add a [`hostPath` volume](https://kubernetes.io/docs/concepts/storage/volumes/#hostpath) with `path` set to `/proc`, then mount it in your container's `volumeMounts` with options `mountPath` set to `/proc2` and `readOnly` set to `false`.
+    * **Why**: By default, in non-privileged mode, the container runtime will mask certain sub-paths of `/proc` inside the container by creating submounts of `/proc` (e.g. `/proc/bus`, `/proc/sys`, etc.). gVisor does not really care or use anything under these sub-mounts, but *does* need to be able to mount `procfs` in the chroot environment it isolates itself in. However, its ability to mount `procfs` requires having an existing unobstructed view of `procfs` (i.e. a mount of `procfs` with no submounts). Otherwise, such mount attempts will be denied by the kernel (see the explanation for "locked" mounts on [`mount_namespaces(8)`](https://www.man7.org/linux/man-pages/man7/mount_namespaces.7.html)). Therefore, exposing an unobstructed (non-recursive) view of `/proc` elsewhere in the container filesystem (such as `/proc2`) informs the kernel that it is OK for this container to be able to mount `procfs`.
 * Remove the container's default **AppArmor profile**:
     * On **Docker**: Add `--security-opt=apparmor=unconfined` to `docker run`.
     * On **Kubernetes**: Set [`spec.securityContext.appArmorProfile.type`](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#set-the-apparmor-profile-for-a-container) to `Unconfined`.
@@ -66,20 +70,22 @@ The below is the minimal subset of changes that `--privileged=true` does that is
 
 ## Self-test mode
 
-To verify that your setup works, you can run the tool in self-test mode using `run_code.py`'s `--use-sample-code` flag.
+To verify that your setup works, you can run the function and the tool in self-test mode using the `--self_test` flag.
 
 For example, here is a Docker invocation running the `run_code.py` script inside the Open WebUI container image with the above flags:
 
 ```shell
 $ git clone https://github.com/EtiennePerot/open-webui-code-execution && \
+  cd open-webui-code-execution && \
   docker run --rm \
     --security-opt=seccomp=unconfined \
     --security-opt=apparmor=unconfined \
     --security-opt=label=type:container_engine_t \
     --mount=type=bind,source=/sys/fs/cgroup,target=/sys/fs/cgroup,readonly=false \
-    --mount=type=bind,source="$(pwd)/open-webui-code-execution",target=/selftest \
+    --mount=type=bind,source=/proc,target=/proc2,readonly=false,bind-recursive=disabled \
+    --mount=type=bind,source="$(pwd)",target=/test \
     ghcr.io/open-webui/open-webui:main \
-    python3 /selftest/open-webui/tools/run_code.py --self_test
+    sh -c 'python3 /test/open-webui/tools/run_code.py --self_test && python3 /test/open-webui/functions/run_code.py --self_test'
 ```
 
 If all goes well, you should see:
@@ -97,10 +103,12 @@ If all goes well, you should see:
 ✔ Self-test long_running_code passed.
 ⏳ Running self-test: ram_hog
 ✔ Self-test ram_hog passed.
-✅ All self-tests passed, good go to!
+✅ All tool self-tests passed, good go to!
+...
+✅ All function self-tests passed, good go to!
 ```
 
-If you get an error, try to add the `--debug` flag at the very end of this command (i.e. as a `run_code.py` flag) for extra information, then file a bug.
+If you get an error, try to add the `--debug` to each `run_code.py` invocation for extra information, then file a bug.
 
 ## Set valves
 
@@ -114,6 +122,7 @@ The code execution tool and function have the following valves available:
   * Useful for multi-user setups to avoid denial-of-service.
 * **Auto Install**: Whether to automatically download and install gVisor if not present in the container.
   * If not installed, gVisor will be automatically installed in `/tmp`.
+  * You can set the HTTPS proxy used for this download using the `HTTPS_PROXY` environment variable.
   * Useful for convenience, but should be disabled for production setups.
 * **Debug**: Whether to produce debug logs.
   * This should never be enabled in production setups as it produces a lot of information that isn't necessary for regular use.

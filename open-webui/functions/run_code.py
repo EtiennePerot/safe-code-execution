@@ -5,7 +5,7 @@ description: Run arbitrary Python or Bash code safely in a gVisor sandbox.
 author: EtiennePerot
 author_url: https://github.com/EtiennePerot/open-webui-code-execution
 funding_url: https://github.com/EtiennePerot/open-webui-code-execution
-version: 0.5.0
+version: 0.6.0
 license: Apache-2.0
 """
 
@@ -35,6 +35,8 @@ license: Apache-2.0
 import asyncio
 import argparse
 import base64
+import ctypes
+import ctypes.util
 import contextlib
 import copy
 import fcntl
@@ -78,7 +80,7 @@ class _Action:
         )
         AUTO_INSTALL: bool = pydantic.Field(
             default=True,
-            description=f"Whether to automatically install gVisor if not installed on the system; may be overridden by environment variable {_VALVE_OVERRIDE_ENVIRONMENT_VARIABLE_NAME_PREFIX}AUTO_INSTALL.",
+            description=f"Whether to automatically install gVisor if not installed on the system; may be overridden by environment variable {_VALVE_OVERRIDE_ENVIRONMENT_VARIABLE_NAME_PREFIX}AUTO_INSTALL. Use the 'HTTPS_PROXY' environment variable to control the proxy used for download.",
         )
         DEBUG: bool = pydantic.Field(
             default=False,
@@ -105,7 +107,7 @@ class _Action:
         )
         WEB_ACCESSIBLE_DIRECTORY_URL: str = pydantic.Field(
             default="/cache/functions/run_code",
-            description=f"URL corresponding to WEB_ACCESSIBLE_DIRECTORY_PATH. May start with '/' to make it relative to the Open WebUI serving domain. may be overridden by environment variable {_VALVE_OVERRIDE_ENVIRONMENT_VARIABLE_NAME_PREFIX}WEB_ACCESSIBLE_DIRECTORY_URL.",
+            description=f"URL corresponding to WEB_ACCESSIBLE_DIRECTORY_PATH. May start with '/' to make it relative to the Open WebUI serving domain. May be overridden by environment variable {_VALVE_OVERRIDE_ENVIRONMENT_VARIABLE_NAME_PREFIX}WEB_ACCESSIBLE_DIRECTORY_URL.",
         )
 
     def __init__(self, valves):
@@ -161,7 +163,6 @@ class _Action:
 
         async def _fail(error_message, status="SANDBOX_ERROR"):
             await emitter.fail(error_message)
-            await emitter.code_execution_result(f"{status}: {error_message}")
             return json.dumps({"status": status, "output": error_message})
 
         await emitter.status("Checking messages for code blocks...")
@@ -327,7 +328,6 @@ class _Action:
                         print(f"[{filename}] {log_line}", file=sys.stderr)
 
                     sandbox.debug_logs(_log)
-            await emitter.code_execution_result(output)
             if status == "OK":
                 generated_files_output = ""
                 if len(generated_files) > 0:
@@ -442,14 +442,6 @@ class _Action:
 
         async def fail(self, description="Unknown error"):
             await self.status(description=description, status="error", done=True)
-
-        async def code_execution_result(self, output):
-            await self._emit(
-                "code_execution_result",
-                {
-                    "output": output,
-                },
-            )
 
         async def message(self, content):
             await self._emit(
@@ -1097,11 +1089,56 @@ class Sandbox:
         ("id",),
         ("uname", "-a"),
         ("ls", "-l", "/proc/self/ns"),
+        ("findmnt",),
         (sys.executable, "--version"),
     )
 
     # Environment variable used to detect interpreter re-execution.
     _MARKER_ENVIRONMENT_VARIABLE = "__CODE_EXECUTION_STAGE"
+
+    # Copy of this file's own contents, for re-execution.
+    # Must be populated at import time using `main`.
+    _SELF_FILE = None
+
+    # libc bindings.
+    # Populated using `_libc`.
+    _LIBC = None
+
+    class _Libc:
+        """
+        Wrapper over libc functions.
+        """
+
+        def __init__(self):
+            libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+            libc.mount.argtypes = (ctypes.c_char_p,)
+            self._libc = libc
+
+        def mount(self, source, target, fs, options):
+            if (
+                self._libc.mount(
+                    source.encode("ascii"),
+                    target.encode("ascii"),
+                    fs.encode("ascii"),
+                    0,
+                    options.encode("ascii"),
+                )
+                < 0
+            ):
+                errno = ctypes.get_errno()
+                raise OSError(
+                    errno,
+                    f"mount({source}, {target}, {fs}, {options}): {os.strerror(errno)}",
+                )
+
+        def umount(self, path):
+            if self._libc.umount(path.encode("ascii")) < 0:
+                errno = ctypes.get_errno()
+                raise OSError(errno, f"umount({path}): {os.strerror(errno)}")
+
+        def unshare(self, flags):
+            if self._libc.unshare(flags) < 0:
+                raise OSError(f"unshare({flags}) failed")
 
     class _Switcheroo:
         """
@@ -1115,7 +1152,8 @@ class Sandbox:
         _CGROUP_SUPERVISOR_NAME = "supervisor"
         _CGROUP_LEAF = "leaf"
 
-        def __init__(self, log_path, max_sandbox_ram_bytes):
+        def __init__(self, libc, log_path, max_sandbox_ram_bytes):
+            self._libc = libc
             self._log_path = log_path
             self._max_sandbox_ram_bytes = max_sandbox_ram_bytes
             self._my_euid = None
@@ -1457,7 +1495,9 @@ class Sandbox:
             for dirpath, _, subfiles in os.walk(
                 self._CGROUP_ROOT, onerror=None, followlinks=False
             ):
-                if not dirpath.startswith(cgroup_root_slash):
+                if dirpath != self._CGROUP_ROOT and not dirpath.startswith(
+                    cgroup_root_slash
+                ):
                     continue
                 if "cgroup.procs" not in subfiles:
                     continue
@@ -1983,8 +2023,56 @@ class Sandbox:
         else:
             return True
 
-    @staticmethod
-    def unshare(flags):
+    @classmethod
+    def check_procfs(cls):
+        """
+        Verifies that we have an unobstructed view of procfs.
+
+        :return: Nothing.
+        :raises EnvironmentNeedsSetupException: If procfs is obstructed.
+        """
+        mount_infos = []
+        with open("/proc/self/mountinfo", "rb") as mountinfo_f:
+            for line in mountinfo_f:
+                line = line.decode("utf-8").strip()
+                if not line:
+                    continue
+                mount_components = line.split(" ")
+                if len(mount_components) != 10:
+                    continue
+                hyphen_index = mount_components.index("-")
+                if hyphen_index < 6:
+                    continue
+                mount_info = {
+                    "mount_path": mount_components[4],
+                    "path_within_mount": mount_components[3],
+                    "fs_type": mount_components[hyphen_index + 1],
+                }
+                mount_infos.append(mount_info)
+        procfs_mounts = frozenset(
+            m["mount_path"]
+            for m in mount_infos
+            if m["fs_type"] == "proc" and m["path_within_mount"] == "/"
+        )
+        if len(procfs_mounts) == 0:
+            raise cls.EnvironmentNeedsSetupException(
+                "procfs is not mounted; please mount it"
+            )
+        obstructed_procfs_mounts = set()
+        for mount_info in mount_infos:
+            for procfs_mount in procfs_mounts:
+                if mount_info["mount_path"].startswith(procfs_mount + os.sep):
+                    obstructed_procfs_mounts.add(procfs_mount)
+        for procfs_mount in procfs_mounts:
+            if procfs_mount not in obstructed_procfs_mounts:
+                return  # We have at least one unobstructed procfs view.
+        assert len(obstructed_procfs_mounts) > 0, "Logic error"
+        raise cls.EnvironmentNeedsSetupException(
+            "procfs is obstructed; please mount a new procfs mount somewhere in the container, e.g. /proc2 (`--mount=type=bind,source=/proc,target=/proc2,readonly=false`)"
+        )
+
+    @classmethod
+    def unshare(cls, flags):
         """
         Implementation of `os.unshare` that works on Python < 3.12.
 
@@ -1995,13 +2083,7 @@ class Sandbox:
             return os.unshare(flags)
 
         # Python <= 3.11:
-        import ctypes
-
-        libc = ctypes.CDLL(None)
-        libc.unshare.argtypes = [ctypes.c_int]
-        rc = libc.unshare(flags)
-        if rc == -1:
-            raise OSError(f"unshare({flags}) failed")
+        return cls._libc().unshare(flags)
 
     @classmethod
     def check_unshare(cls):
@@ -2109,18 +2191,29 @@ class Sandbox:
         cls.check_platform()
         cls.check_unshare()
         cls.check_cgroups()
+        cls.check_procfs()
         if not auto_install_allowed and cls.get_runsc_path() is None:
             raise cls.GVisorNotInstalledException(
                 "gVisor is not installed (runsc binary not found in $PATH); please install it or enable AUTO_INSTALL valve for auto installation"
             )
 
     @classmethod
-    def maybe_main(cls):
+    def _libc(cls):
+        if cls._LIBC is None:
+            cls._LIBC = cls._Libc()
+        return cls._LIBC
+
+    @classmethod
+    def main(cls):
         """
-        Entry-point for re-execution.
+        Entry-point for (re-)execution.
+        Populates `cls._SELF_FILE`, so must be called during import.
         May call `sys.exit` if this is intended to be a code evaluation re-execution.
         """
-        if os.environ.get(cls._MARKER_ENVIRONMENT_VARIABLE) is None:
+        if cls._SELF_FILE is None:
+            with open(__file__, "r") as self_f:
+                cls._SELF_FILE = self_f.read()
+        if cls._MARKER_ENVIRONMENT_VARIABLE not in os.environ:
             return
         directives = json.load(sys.stdin)
         try:
@@ -2214,6 +2307,7 @@ class Sandbox:
         self._persistent_home_dir = self._settings["persistent_home_dir"]
         self._sandboxed_command = None
         self._switcheroo = self._Switcheroo(
+            libc=self._libc(),
             log_path=os.path.join(self._logs_path, "switcheroo.txt"),
             max_sandbox_ram_bytes=self._max_ram_bytes,
         )
@@ -2242,6 +2336,7 @@ class Sandbox:
                 raise self.SandboxException(
                     f"Persistent home directory {self._persistent_home_dir} does not exist"
                 )
+        oci_config["root"]["path"] = rootfs_path
 
         try:
             self._switcheroo.do()
@@ -2252,8 +2347,6 @@ class Sandbox:
                 raise e
             else:
                 raise e.__class__(f"{e}; {switcheroo_status}")
-
-        oci_config["root"]["path"] = rootfs_path
 
         # Locate the interpreter to use.
         interpreter_path = sys.executable
@@ -2512,12 +2605,15 @@ class Sandbox:
         :raises Sandbox.InterruptedExecutionError: If the code interpreter died without providing a return code; usually due to running over resource limits.
         :raises sandbox.CodeExecutionError: If the code interpreter failed to execute the given code. This does not represent a sandbox failure.
         """
+        reexec_path = os.path.join(self._tmp_dir, "self.py")
+        with open(reexec_path, "w") as reexec_f:
+            reexec_f.write(self._SELF_FILE)
         new_env = os.environ.copy()
         new_env[self._MARKER_ENVIRONMENT_VARIABLE] = "1"
         data = json.dumps({"settings": self._settings})
         try:
             result = subprocess.run(
-                (sys.executable, os.path.abspath(__file__)),
+                (sys.executable, reexec_path),
                 env=new_env,
                 input=data,
                 text=True,
@@ -2862,6 +2958,7 @@ def _do_self_tests(debug):
             "code": (f"head -c{64 * 1024 * 1024} /dev/urandom > random_data.bin",),
             "valves": {
                 "MAX_MEGABYTES_PER_USER": 32,
+                "MAX_RAM_MEGABYTES": 2048,
             },
             "status": "STORAGE_ERROR",
             "post": _want_user_storage_num_files(16),
@@ -3052,17 +3149,17 @@ def _do_self_tests(debug):
                         else:
                             print(f"✔️ Self-test {name} passed.", file=sys.stderr)
     if success:
-        print("✅ All self-tests passed, good go to!", file=sys.stderr)
+        print("✅ All function self-tests passed, good go to!", file=sys.stderr)
         sys.exit(0)
     else:
-        print("☠️ One or more self-tests failed.", file=sys.stderr)
+        print("☠️ One or more function self-tests failed.", file=sys.stderr)
         sys.exit(1)
     assert False, "Unreachable"
 
 
+Sandbox.main()
 # Debug utility: Run code from stdin if running as a normal Python script.
 if __name__ == "__main__":
-    Sandbox.maybe_main()
     parser = argparse.ArgumentParser(
         description="Run arbitrary code in a gVisor sandbox."
     )
