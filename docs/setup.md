@@ -6,7 +6,7 @@ Both the code execution function and tool require the ability to run [gVisor](ht
 
 This utility should work wherever gVisor works, i.e. x86_64/AMD64 and ARM64 processors.
 
-gVisor only runs on Linux. However, if you are running on Windows or OS X, you can use [Docker Desktop](https://www.docker.com/products/docker-desktop/) or similar container runtime which will automatically run a Linux virtual machine in which the container will actually run.
+gVisor only runs on Linux. However, if you are running on Windows or OS X, you can use [Docker Desktop](https://www.docker.com/products/docker-desktop/) or similar container runtime; this will automatically run a Linux virtual machine in which the container will actually run.
 
 ## Container runtime setup
 
@@ -26,7 +26,7 @@ You can do this the **easy way** (good for single-user setups) by running Open W
 
 **This will remove all security measures** from the Open WebUI container. From a security perspective, this is roughly equivalent to running the Open WebUI server as root outside of a container on the host machine. However, **code running as part of this code execution function/tool will still run in a secure gVisor sandbox** and cannot impact the host or the Open WebUI container.
 
-This is adequate for single-user setups not exposed to the outside Internet, while still providing strong security against LLMs generating malicious code. However, if you are running a multi-user setup, or if you do not fully trust Open WebUI's code, or the Open WebUI server's HTTP port is exposed to the outside Internet, you may want to harden it further. If so, **don't** set the `privileged` setting, and read on to the hard way instead.
+This is adequate for single-user setups not exposed to the outside Internet, while still providing strong security against LLMs generating malicious code. However, if you are running a multi-user setup, or if you do not fully trust Open WebUI's code, or the Open WebUI server's HTTP port is exposed to the outside Internet, you may want to harden it further. If so, **don't** set the `privileged` setting, and read on to "the hard way" instead.
 
 </details>
 
@@ -128,10 +128,25 @@ The code execution tool and function have the following valves available:
   * This should never be enabled in production setups as it produces a lot of information that isn't necessary for regular use.
   * **When filing a bug report**, please enable this valve, then reproduce the issue in a new chat session, then download the chat log (triple-dot menu → `Download` → `Export chat (.json)`) and attach it to the bug report.
 
-## Optional: Pre-install gVisor
+## **Optional**: Pre-install gVisor
 
-To avoid the tool having to download and install gVisor on first run, you can pre-install gVisor in your Open WebUI container image or environment. Follow the [gVisor installation guide](https://gvisor.dev/docs/user_guide/install/). At the end, the command `runsc --version` (run within the Open WebUI container if you are running it in a container) should work and return the gVisor version you installed.
+To avoid the tool having to download and install gVisor on first run, you can **optionally** pre-install gVisor in your Open WebUI container image or environment. For example, here is a sample `Dockerfile` that extends the Open WebUI container image and pre-installs gVisor:
 
-## Optional: Lockdown for production setups
+```Dockerfile
+# Note: Using this Dockerfile is optional.
+FROM ghcr.io/open-webui/open-webui:main
 
-TODO: Add environment variables that take precedence over valves to allow multi-user setups.
+# Install `wget`.
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y </dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y wget </dev/null
+
+# Install gVisor as `/usr/bin/runsc`.
+RUN wget -O /tmp/runsc "https://storage.googleapis.com/gvisor/releases/release/latest/$(uname -m)/runsc" && \
+    wget -O /tmp/runsc.sha512 "https://storage.googleapis.com/gvisor/releases/release/latest/$(uname -m)/runsc.sha512" && \
+    cd /tmp && sha512sum -c runsc.sha512 && \
+    chmod 555 /tmp/runsc && rm /tmp/runsc.sha512 && mv /tmp/runsc /usr/bin/runsc
+```
+
+
+## **Optional**: Lockdown for production setups
+
+TODO: Document environment variables that take precedence over valves to allow multi-user setups.
