@@ -110,7 +110,7 @@ class _Tools:
 
         :return: A JSON object with the following fields: `status`, `output`. In most cases, when `status` is "OK", the user is interested in the content of the `output` field. Otherwise, report the `status` field first.
         """
-        return await self._run_code(
+        return await self.(
             language=Sandbox.LANGUAGE_BASH,
             code=bash_command,
             event_emitter=__event_emitter__,
@@ -128,7 +128,7 @@ class _Tools:
 
         :return: A JSON object with the following fields: `status`, `output`. In most cases, when `status` is "OK", the user is interested in the content of the `output` field. Otherwise, report the `status` field first.
         """
-        return await self._run_code(
+        return await self.(
             language=Sandbox.LANGUAGE_PYTHON,
             code=python_code,
             event_emitter=__event_emitter__,
@@ -294,6 +294,7 @@ class _Tools:
                     )
             return json.dumps(
                 {
+                    "input": code,
                     "status": status,
                     "output": output,
                 },
