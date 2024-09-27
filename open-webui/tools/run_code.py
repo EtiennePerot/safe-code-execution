@@ -294,6 +294,7 @@ class _Tools:
                     )
             return json.dumps(
                 {
+                    "input": code,
                     "status": status,
                     "output": output,
                 },
