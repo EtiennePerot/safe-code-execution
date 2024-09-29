@@ -294,6 +294,7 @@ class _Tools:
                     f"Running {language_title} code in gVisor sandbox..."
                 )
 
+                # TODO: Wrap this in an emitter helper function.
                 await event_emitter(
                     {
                         "type": "citation",
@@ -304,7 +305,7 @@ class _Tools:
                         },
                     }
                 )
-                
+
                 try:
                     result = sandbox.run()
                 except Sandbox.ExecutionTimeoutError as e:
