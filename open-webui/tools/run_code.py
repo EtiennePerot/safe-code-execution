@@ -293,6 +293,18 @@ class _Tools:
                 await emitter.status(
                     f"Running {language_title} code in gVisor sandbox..."
                 )
+
+                await event_emitter(
+                    {
+                        "type": "citation",
+                        "data": {
+                            "document": [code],
+                            "metadata": [code],
+                            "source": {"name": "run_code"},
+                        },
+                    }
+                )
+                
                 try:
                     result = sandbox.run()
                 except Sandbox.ExecutionTimeoutError as e:
@@ -336,6 +348,7 @@ class _Tools:
                     )
             return json.dumps(
                 {
+                    "input": code,
                     "status": status,
                     "output": output,
                 },
