@@ -5,7 +5,7 @@ description: Run arbitrary Python or Bash code safely in a gVisor sandbox.
 author: EtiennePerot
 author_url: https://github.com/EtiennePerot/open-webui-code-execution
 funding_url: https://github.com/EtiennePerot/open-webui-code-execution
-version: 0.6.0
+version: 0.7.0
 license: Apache-2.0
 """
 
