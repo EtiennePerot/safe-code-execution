@@ -574,8 +574,8 @@ class _Action:
                     return None
                 if contents and contents[-1] == "\n":
                     contents = contents[:-1]
-                return f"📄 [{self.name}]({self.url}):\n```\n{contents}\n```"
-            components = [f"📃 [{self.name}]({self.url}):"]
+                return f"\U0001f4c4 [{self.name}]({self.url}):\n```\n{contents}\n```"
+            components = [f"\U0001f4c3 [{self.name}]({self.url}):"]
             for line in lines:
                 components.append(f"> {line}")
             if components[-1] == "> ":
@@ -584,19 +584,19 @@ class _Action:
 
         def _markdown(self):
             if self._size_bytes == 0:
-                return f"⁉️ `{self.name}` (empty)"
+                return f"\u2049 `{self.name}` (empty)"
             inline_markdown = self._inline_markdown()
             if inline_markdown is not None:
                 return inline_markdown
-            icon = "💾"
+            icon = "\U0001f4be"
             if self._mime_type.startswith("text/"):
-                icon = "📄"
+                icon = "\U0001f4c4"
             elif self._mime_type.startswith("image/"):
-                icon = "🖼️"
+                icon = "\U0001f5bc"
             elif self._mime_type.startswith("audio/"):
-                icon = "🎵"
+                icon = "\U0001f3b5"
             elif self._mime_type.startswith("video/"):
-                icon = "🎬"
+                icon = "\U0001f3ac"
             size = f"{self._size_bytes} bytes"
             if self._size_bytes > 1024 * 1024 * 1024:
                 size = f"{self._size_bytes // 1024 // 1024 // 1024} GiB"
@@ -2086,12 +2086,12 @@ class Sandbox:
             full_code = self._code
             short_code = full_code.replace("\n", ";")
             if len(short_code) >= 128:
-                short_code = short_code[:60] + "…" + short_code[-60:]
+                short_code = short_code[:60] + "\u2026" + short_code[-60:]
             if self.stderr:
                 lines = [l.strip() for l in self.stderr.split("\n") if l.strip()]
                 if len(lines) >= 2:
                     first_line, last_line = lines[0], lines[-1]
-                    return f"{first_line} […] {last_line} (`{short_code}`)\n{super_str}\n```\n{full_code}\n```"
+                    return f"{first_line} [\u2026] {last_line} (`{short_code}`)\n{super_str}\n```\n{full_code}\n```"
                 if len(lines) == 1:
                     first_line = lines[0]
                     return f"{first_line} (`{short_code}`)\n{super_str}\n```\n{full_code}\n```"
@@ -3066,7 +3066,7 @@ def _do_self_tests(debug):
             "status": "OK",
             "generated_files": {
                 "foo/bar/dmesg.txt": (
-                    _markdown_contains("📄"),
+                    _markdown_contains("\U0001f4c4"),
                     _markdown_contains("[foo/bar/dmesg.txt]"),
                     _markdown_contains("(http://myhost/URL/ROOT/"),
                     _markdown_contains("/foo/bar/dmesg.txt)"),
@@ -3074,44 +3074,44 @@ def _do_self_tests(debug):
                     _markdown_contains("```"),
                 ),
                 "empty.txt": (
-                    _markdown_contains("⁉️"),
-                    _markdown_does_not_contain("📄"),
+                    _markdown_contains("\u2049"),
+                    _markdown_does_not_contain("\U0001f4c4"),
                     _markdown_contains("`empty.txt`"),
                     _markdown_contains("(empty)"),
                     _markdown_does_not_contain("[empty.txt]"),
                     _markdown_does_not_contain("(http://myhost/URL/ROOT"),
                 ),
                 "markdown.md": (
-                    _markdown_contains("📃"),
-                    _markdown_does_not_contain("📄"),
+                    _markdown_contains("\U0001f4c3"),
+                    _markdown_does_not_contain("\U0001f4c4"),
                     _markdown_contains(
                         "\n> # Example markdown file\n> This is markdown!"
                     ),
                     _markdown_does_not_contain("```"),
                 ),
                 "no_inline.txt": (
-                    _markdown_contains("📄"),
+                    _markdown_contains("\U0001f4c4"),
                     _markdown_does_not_contain("This file cannot"),
                     _markdown_does_not_contain("```"),
                 ),
                 "picture.png": (
-                    _markdown_contains("🖼️"),
+                    _markdown_contains("\U0001f5bc"),
                     _markdown_does_not_contain("Might be"),
                 ),
                 "song.flac": (
-                    _markdown_contains("🎵"),
+                    _markdown_contains("\U0001f3b5"),
                     _markdown_does_not_contain("Might be"),
                 ),
                 "movie.mkv": (
-                    _markdown_contains("🎬"),
+                    _markdown_contains("\U0001f3ac"),
                     _markdown_does_not_contain("Might be"),
                 ),
                 "random_data": (
-                    _markdown_contains("💾"),
+                    _markdown_contains("\U0001f4be"),
                     _markdown_does_not_contain("Might be"),
                 ),
                 "random_data.bin": (
-                    _markdown_contains("💾"),
+                    _markdown_contains("\U0001f4be"),
                     _markdown_does_not_contain("Might be"),
                 ),
             },
@@ -3224,11 +3224,11 @@ def _do_self_tests(debug):
 
     def _print_output(obj):
         if obj.stdout:
-            print("  🗨️ Output:", file=sys.stderr)
+            print("  \U0001f5e8 Output:", file=sys.stderr)
             for stdout_line in obj.stdout.split("\n"):
                 print(f"    {stdout_line}")
         if obj.stderr:
-            print("  🐞 Debug:", file=sys.stderr)
+            print("  \U0001f41e Debug:", file=sys.stderr)
             for stderr_line in obj.stderr.split("\n"):
                 print(f"    {stderr_line}")
 
@@ -3265,7 +3265,7 @@ def _do_self_tests(debug):
             ]
             if debug or self_test.get("debug", False):
                 test_argv.append("--debug")
-            print(f"⏳ Running self-test: {name}", file=sys.stderr)
+            print(f"\u23f3 Running self-test: {name}", file=sys.stderr)
             try:
                 result = subprocess.run(
                     test_argv,
@@ -3280,13 +3280,13 @@ def _do_self_tests(debug):
                 success = False
                 _print_output(e)
                 print(
-                    f"❌ Self-test {name} failed: process failed: {e}", file=sys.stderr
+                    f"\u274c Self-test {name} failed: process failed: {e}", file=sys.stderr
                 )
             except Exception as e:
                 success = False
                 exception_class = e.__class__
                 print(
-                    f"❌ Self-test {name} failed: {exception_class}: {e}",
+                    f"\u274c Self-test {name} failed: {exception_class}: {e}",
                     file=sys.stderr,
                 )
             else:
@@ -3296,7 +3296,7 @@ def _do_self_tests(debug):
                     _print_output(result)
                     success = False
                     print(
-                        f"❌ Self-test {name} failed: JSON decoding failed: {e}; got: {result.stdout}",
+                        f"\u274c Self-test {name} failed: JSON decoding failed: {e}; got: {result.stdout}",
                         file=sys.stderr,
                     )
                 else:
@@ -3307,7 +3307,7 @@ def _do_self_tests(debug):
                     if got_status != want_status:
                         success = False
                         print(
-                            f"❌ Self-test {name} failed: status was {got_status}, expected {want_status}",
+                            f"\u274c Self-test {name} failed: status was {got_status}, expected {want_status}",
                             file=sys.stderr,
                         )
                     elif want_generated_files(got_generated_files) is not None:
@@ -3316,7 +3316,7 @@ def _do_self_tests(debug):
                             got_generated_files
                         )
                         print(
-                            f"❌ Self-test {name} failed: generated files are incorrect: {generated_files_error}",
+                            f"\u274c Self-test {name} failed: generated files are incorrect: {generated_files_error}",
                             file=sys.stderr,
                         )
                     else:
@@ -3330,16 +3330,16 @@ def _do_self_tests(debug):
                         if post_test_failure is not None:
                             success = False
                             print(
-                                f"❌ Self-test {name} failed: post-test verification failed: {post_test_failure}",
+                                f"\u274c Self-test {name} failed: post-test verification failed: {post_test_failure}",
                                 file=sys.stderr,
                             )
                         else:
-                            print(f"✔️ Self-test {name} passed.", file=sys.stderr)
+                            print(f"\u2714 Self-test {name} passed.", file=sys.stderr)
     if success:
-        print("✅ All function self-tests passed, good go to!", file=sys.stderr)
+        print("\u2705 All function self-tests passed, good go to!", file=sys.stderr)
         sys.exit(0)
     else:
-        print("☠️ One or more function self-tests failed.", file=sys.stderr)
+        print("\u2620 One or more function self-tests failed.", file=sys.stderr)
         sys.exit(1)
     assert False, "Unreachable"
 

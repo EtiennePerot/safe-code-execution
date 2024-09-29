@@ -451,7 +451,7 @@ class SelfFile:
         """
         if cls._CONTENTS is None:
             with open(__file__, "rb") as self_f:
-                cls._CONTENTS = self_f.read().decode("utf-8")  # TODO: Use ASCII
+                cls._CONTENTS = self_f.read().decode("ascii")
 
     @classmethod
     def contents(cls) -> str:
@@ -1551,12 +1551,12 @@ class Sandbox:
             full_code = self._code
             short_code = full_code.replace("\n", ";")
             if len(short_code) >= 128:
-                short_code = short_code[:60] + "…" + short_code[-60:]
+                short_code = short_code[:60] + "\u2026" + short_code[-60:]
             if self.stderr:
                 lines = [l.strip() for l in self.stderr.split("\n") if l.strip()]
                 if len(lines) >= 2:
                     first_line, last_line = lines[0], lines[-1]
-                    return f"{first_line} […] {last_line} (`{short_code}`)\n{super_str}\n```\n{full_code}\n```"
+                    return f"{first_line} [\u2026] {last_line} (`{short_code}`)\n{super_str}\n```\n{full_code}\n```"
                 if len(lines) == 1:
                     first_line = lines[0]
                     return f"{first_line} (`{short_code}`)\n{super_str}\n```\n{full_code}\n```"
@@ -2474,11 +2474,11 @@ def _do_self_tests(debug):
 
     def _print_output(obj):
         if obj.stdout:
-            print("  🗨️ Output:", file=sys.stderr)
+            print("  \U0001f5e8 Output:", file=sys.stderr)
             for stdout_line in obj.stdout.split("\n"):
                 print(f"    {stdout_line}")
         if obj.stderr:
-            print("  🐞 Debug:", file=sys.stderr)
+            print("  \U0001f41e Debug:", file=sys.stderr)
             for stderr_line in obj.stderr.split("\n"):
                 print(f"    {stderr_line}")
 
@@ -2502,7 +2502,7 @@ def _do_self_tests(debug):
         ]
         if debug or self_test.get("debug", False):
             test_argv.append("--debug")
-        print(f"⏳ Running self-test: {name}", file=sys.stderr)
+        print(f"\u23f3 Running self-test: {name}", file=sys.stderr)
         try:
             result = subprocess.run(
                 test_argv,
@@ -2516,12 +2516,12 @@ def _do_self_tests(debug):
         except subprocess.CalledProcessError as e:
             success = False
             _print_output(e)
-            print(f"❌ Self-test {name} failed: process failed: {e}", file=sys.stderr)
+            print(f"\u274c Self-test {name} failed: process failed: {e}", file=sys.stderr)
         except Exception as e:
             success = False
             exception_class = e.__class__
             print(
-                f"❌ Self-test {name} failed: {exception_class}: {e}", file=sys.stderr
+                f"\u274c Self-test {name} failed: {exception_class}: {e}", file=sys.stderr
             )
         else:
             try:
@@ -2530,7 +2530,7 @@ def _do_self_tests(debug):
                 _print_output(result)
                 success = False
                 print(
-                    f"❌ Self-test {name} failed: JSON decoding failed: {e}",
+                    f"\u274c Self-test {name} failed: JSON decoding failed: {e}",
                     file=sys.stderr,
                 )
             else:
@@ -2539,18 +2539,18 @@ def _do_self_tests(debug):
                     _print_output(result)
                     success = False
                     print(
-                        f"❌ Self-test {name} failed: status was {got_status}, expected {want_status}",
+                        f"\u274c Self-test {name} failed: status was {got_status}, expected {want_status}",
                         file=sys.stderr,
                     )
                 else:
                     if debug:
                         _print_output(result)
-                    print(f"✔️ Self-test {name} passed.", file=sys.stderr)
+                    print(f"\u2714 Self-test {name} passed.", file=sys.stderr)
     if success:
-        print("✅ All tool self-tests passed, good go to!", file=sys.stderr)
+        print("\u2705 All tool self-tests passed, good go to!", file=sys.stderr)
         sys.exit(0)
     else:
-        print("☠️ One or more tool self-tests failed.", file=sys.stderr)
+        print("\u2620 One or more tool self-tests failed.", file=sys.stderr)
         sys.exit(1)
     assert False, "Unreachable"
 
