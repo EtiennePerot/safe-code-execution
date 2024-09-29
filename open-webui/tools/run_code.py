@@ -126,12 +126,20 @@ class _Tools:
 
         :param bash_command: Bash command or script to run.
 
-        :return: A JSON object with the following fields: `status`, `output`. In most cases, when `status` is "OK", the user is interested in the content of the `output` field. Otherwise, report the `status` field first.
+        :return: A JSON object with the following fields: `bash_command`, `status`, `output`. In most cases, when `status` is "OK", the user is interested in the content of the `output` field. Otherwise, report the `status` field first.
         """
-        return await self._run_code(
+        result = await self._run_code(
             language=Sandbox.LANGUAGE_BASH,
             code=bash_command,
             event_emitter=__event_emitter__,
+        )
+        return json.dumps(
+            {
+                "bash_command": bash_command,
+                "status": result["status"],
+                "output": result["output"],
+            },
+            ensure_ascii=False,
         )
 
     async def run_python_code(
@@ -144,12 +152,20 @@ class _Tools:
 
         :param python_code: Python code to run.
 
-        :return: A JSON object with the following fields: `status`, `output`. In most cases, when `status` is "OK", the user is interested in the content of the `output` field. Otherwise, report the `status` field first.
+        :return: A JSON object with the following fields: `python_code`, `status`, `output`. In most cases, when `status` is "OK", the user is interested in the content of the `output` field. Otherwise, report the `status` field first.
         """
-        return await self._run_code(
+        result = await self._run_code(
             language=Sandbox.LANGUAGE_PYTHON,
             code=python_code,
             event_emitter=__event_emitter__,
+        )
+        return json.dumps(
+            {
+                "python_code": python_code,
+                "status": result["status"],
+                "output": result["output"],
+            },
+            ensure_ascii=False,
         )
 
     class _EventEmitter:
@@ -251,7 +267,7 @@ class _Tools:
         :param code: The code to run.
         :param event_emitter: Event emitter to send status updates to.
 
-        :return: A JSON object with the following fields: `status`, `output`. In most cases, when `status` is "OK", the user is interested in the content of the `output` field. Otherwise, report the `status` field first.
+        :return: A dictionary with the following fields: `status`, `output`.
         """
         valves = self.valves
         debug = valves.DEBUG
@@ -280,7 +296,7 @@ class _Tools:
                 )
             else:
                 await emitter.fail(error_message)
-            return json.dumps({"status": status, "output": error_message})
+            return {"status": status, "output": error_message}
 
         try:
             max_ram_bytes = None
@@ -376,16 +392,10 @@ class _Tools:
                         done=True,
                         description=f"[DEBUG MODE] status={status}; output={output}; valves=[{valves}]; debug={per_file_logs}",
                     )
-            return json.dumps(
-                {
-                    # TODO: Explain the 'input' in the tool docstring.
-                    # TODO: Rename 'input' to the argument name in the tool.
-                    "input": code,
-                    "status": status,
-                    "output": output,
-                },
-                ensure_ascii=False,
-            )
+            return {
+                "status": status,
+                "output": output,
+            }
         except Sandbox.PlatformNotSupportedException as e:
             return await _fail(f"Sandbox cannot run on this machine: {e}")
         except Sandbox.SandboxRuntimeException as e:
