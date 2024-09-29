@@ -103,8 +103,8 @@ To verify that your setup works, you can run the function and the tool in self-t
 For example, here is a Docker invocation running the `run_code.py` script inside the Open WebUI container image with the above flags:
 
 ```shell
-$ git clone https://github.com/EtiennePerot/open-webui-code-execution && \
-  cd open-webui-code-execution && \
+$ git clone https://github.com/EtiennePerot/safe-code-execution && \
+  cd safe-code-execution && \
   docker run --rm \
     --security-opt=seccomp=unconfined \
     --security-opt=apparmor=unconfined \

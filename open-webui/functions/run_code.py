@@ -3,8 +3,8 @@ id: run_code
 title: Run code
 description: Run arbitrary Python or Bash code safely in a gVisor sandbox.
 author: EtiennePerot
-author_url: https://github.com/EtiennePerot/open-webui-code-execution
-funding_url: https://github.com/EtiennePerot/open-webui-code-execution
+author_url: https://github.com/EtiennePerot/safe-code-execution
+funding_url: https://github.com/EtiennePerot/safe-code-execution
 version: 0.7.0
 license: Apache-2.0
 """
@@ -12,13 +12,13 @@ license: Apache-2.0
 # NOTE: If running Open WebUI in a container, you *need* to set up this container to allow sandboxed code execution.
 # Please read the docs here:
 #
-#   https://github.com/EtiennePerot/open-webui-code-execution/blob/master/README.md
+#   https://github.com/EtiennePerot/safe-code-execution/blob/master/README.md
 #
 # This is an OpenWebUI *function*. It can run code within LLM-generated code blocks.
 # If you are looking for an OpenWebUI *tool* to allow the LLM to run its own code,
 # see here instead: https://openwebui.com/t/etienneperot/run_code/
 #
-# See https://github.com/EtiennePerot/open-webui-code-execution for more info.
+# See https://github.com/EtiennePerot/safe-code-execution for more info.
 #
 # Protip: You can test this tool manually by running it as a Python script, like so:
 # (Run this inside the Open WebUI container)
@@ -1013,9 +1013,9 @@ class UpdateCheck:
     """
 
     RELEASES_URL = (
-        "https://github.com/EtiennePerot/open-webui-code-execution/releases.atom"
+        "https://github.com/EtiennePerot/safe-code-execution/releases.atom"
     )
-    USER_URL = "https://github.com/EtiennePerot/open-webui-code-execution/"
+    USER_URL = "https://github.com/EtiennePerot/safe-code-execution/"
     SELF_VERSION = None
     LAST_UPDATE_CHECK = None
     LAST_UPDATE_CACHE = None

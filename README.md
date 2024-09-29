@@ -12,7 +12,7 @@ You can install both.
 
 | **Code execution function** | **Code execution tool** |
 | --------------------------- | ----------------------- |
-| ![Code execution function](https://github.com/EtiennePerot/open-webui-code-execution/blob/master/res/code-execution-function.gif?raw=true) | ![Code execution tool](https://github.com/EtiennePerot/open-webui-code-execution/blob/master/res/code-execution-tool.gif?raw=true) |
+| ![Code execution function](https://github.com/EtiennePerot/safe-code-execution/blob/master/res/code-execution-function.gif?raw=true) | ![Code execution tool](https://github.com/EtiennePerot/safe-code-execution/blob/master/res/code-execution-tool.gif?raw=true) |
 | Click button to run code block. | Grant the LLM the ability to run code by itself. |
 
 ## Code execution function
@@ -30,7 +30,7 @@ Then, in Open WebUI:
 * Input the following:
     * **Function name**: `Run code`
     * **Function description**: `Run arbitrary code safely in a gVisor sandbox.`
-    * Replace the **code section** with the contents of [`open-webui/functions/run_code.py`](https://raw.githubusercontent.com/EtiennePerot/open-webui-code-execution/master/open-webui/functions/run_code.py).
+    * Replace the **code section** with the contents of [`open-webui/functions/run_code.py`](https://raw.githubusercontent.com/EtiennePerot/safe-code-execution/master/open-webui/functions/run_code.py).
 * Click the `Save` button.
 * Activate both toggles on the function you just created.
 
@@ -38,7 +38,7 @@ Then, in Open WebUI:
 <summary>See screenshot</summary>
 <div align="center">
 	<p>
-		<img src="https://github.com/EtiennePerot/open-webui-code-execution/blob/master/res/functions.png?raw=true" alt="Functions list"/>
+		<img src="https://github.com/EtiennePerot/safe-code-execution/blob/master/res/functions.png?raw=true" alt="Functions list"/>
 	</p>
 </div>
 </details>
@@ -51,7 +51,7 @@ Ask the model to generate code, then click the `Run code` button under the messa
 <summary>See screenshot</summary>
 <div align="center">
 	<p>
-		<img src="https://github.com/EtiennePerot/open-webui-code-execution/blob/master/res/code-execution-function.gif?raw=true" alt="Code execution tool"/>
+		<img src="https://github.com/EtiennePerot/safe-code-execution/blob/master/res/code-execution-function.gif?raw=true" alt="Code execution tool"/>
 	</p>
 	<p>
 		<em>Code execution function used to inform the model of the current date, along with demo of gVisor sandboxing and internet reachability.</em>
@@ -74,14 +74,14 @@ Then, in Open WebUI:
 * Input the following:
     * **Toolkit name**: `Run code`
     * **Toolkit description**: `Run arbitrary code safely in a gVisor sandbox.`
-    * Replace the **code section** with the contents of [`open-webui/tools/run_code.py`](https://raw.githubusercontent.com/EtiennePerot/open-webui-code-execution/master/open-webui/tools/run_code.py).
+    * Replace the **code section** with the contents of [`open-webui/tools/run_code.py`](https://raw.githubusercontent.com/EtiennePerot/safe-code-execution/master/open-webui/tools/run_code.py).
 * Click the `Save` button.
 
 <details>
 <summary>See screenshot</summary>
 <div align="center">
 	<p>
-		<img src="https://github.com/EtiennePerot/open-webui-code-execution/blob/master/res/tools.png?raw=true" alt="Tools list"/>
+		<img src="https://github.com/EtiennePerot/safe-code-execution/blob/master/res/tools.png?raw=true" alt="Tools list"/>
 	</p>
 </div>
 </details>
@@ -99,7 +99,7 @@ The tool needs to be enabled on a per-model basis.
 <summary>See screenshot</summary>
 <div align="center">
 	<p>
-		<img src="https://github.com/EtiennePerot/open-webui-code-execution/blob/master/res/model.png?raw=true" alt="Models list"/>
+		<img src="https://github.com/EtiennePerot/safe-code-execution/blob/master/res/model.png?raw=true" alt="Models list"/>
 	</p>
 </div>
 </details>
@@ -112,7 +112,7 @@ When prompting the model, activate the "Run code" toggle on the message box. The
 <summary>See screenshot</summary>
 <div align="center">
 	<p>
-		<img src="https://github.com/EtiennePerot/open-webui-code-execution/blob/master/res/code-execution-tool.gif?raw=true" alt="Code execution tool"/>
+		<img src="https://github.com/EtiennePerot/safe-code-execution/blob/master/res/code-execution-tool.gif?raw=true" alt="Code execution tool"/>
 	</p>
 	<p>
 		<em>Code execution tool looking up the date, retrieving a webpage that was not in its training set, and performing complex computations.</em>
