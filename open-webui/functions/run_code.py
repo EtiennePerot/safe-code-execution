@@ -1020,6 +1020,7 @@ class Sandbox:
                 "SHLVL=1",
                 "TERM=xterm",
                 "USER=user",
+                "TZ=" + time.tzname[0],
             ],
             "cwd": "/home/user",
             "capabilities": {
