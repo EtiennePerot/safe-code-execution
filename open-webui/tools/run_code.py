@@ -349,6 +349,8 @@ class _Tools:
                     )
             return json.dumps(
                 {
+                    # TODO: Explain the 'input' in the tool docstring.
+                    # TODO: Rename 'input' to the argument name in the tool.
                     "input": code,
                     "status": status,
                     "output": output,
