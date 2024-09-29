@@ -488,6 +488,16 @@ class _Action:
                 },
             )
 
+        async def citation(self, document, metadata, source):
+            await self._emit(
+                "citation",
+                {
+                    "document": document,
+                    "metadata": metadata,
+                    "source": source,
+                },
+            )
+
         async def code_execution_result(self, output):
             await self._emit(
                 "code_execution_result",
@@ -3280,7 +3290,8 @@ def _do_self_tests(debug):
                 success = False
                 _print_output(e)
                 print(
-                    f"\u274c Self-test {name} failed: process failed: {e}", file=sys.stderr
+                    f"\u274c Self-test {name} failed: process failed: {e}",
+                    file=sys.stderr,
                 )
             except Exception as e:
                 success = False
