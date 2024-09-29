@@ -80,10 +80,13 @@ The code execution tool and function have the following valves available:
   * Useful for multi-user setups to avoid denial-of-service, and to avoid running LLM-generated code that contains infinite loops forever.
 * **Max RAM**: The maximum amount of memory the sandboxed code will be allowed to use, in megabytes.
   * Useful for multi-user setups to avoid denial-of-service.
-* **Auto Install**: Whether to automatically download and install gVisor if not present in the container.
+* **Auto install**: Whether to automatically download and install gVisor if not present in the container.
   * If not installed, gVisor will be automatically installed in `/tmp`.
   * You can set the HTTPS proxy used for this download using the `HTTPS_PROXY` environment variable.
   * Useful for convenience, but should be disabled for production setups. See below on how to pre-install gVisor.
+* **Check for updates**: Whether to automatically check for updates.
+  * When enabled, update checking will happen at most once every three days.
+  * You can set the HTTPS proxy used for this download using the `HTTPS_PROXY` environment variable.
 * **Debug**: Whether to produce debug logs.
   * This should never be enabled in production setups as it produces a lot of information that isn't necessary for regular use.
   * **When filing a bug report**, please enable this valve, then reproduce the issue in a new chat session, then download the chat log (triple-dot menu → `Download` → `Export chat (.json)`) and attach it to the bug report.

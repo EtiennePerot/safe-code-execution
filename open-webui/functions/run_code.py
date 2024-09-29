@@ -39,6 +39,7 @@ import ctypes
 import ctypes.util
 import contextlib
 import copy
+import datetime
 import fcntl
 import json
 import hashlib
@@ -81,6 +82,10 @@ class _Action:
         AUTO_INSTALL: bool = pydantic.Field(
             default=True,
             description=f"Whether to automatically install gVisor if not installed on the system; may be overridden by environment variable {_VALVE_OVERRIDE_ENVIRONMENT_VARIABLE_NAME_PREFIX}AUTO_INSTALL. Use the 'HTTPS_PROXY' environment variable to control the proxy used for download.",
+        )
+        CHECK_FOR_UPDATES: bool = pydantic.Field(
+            default=True,
+            description=f"Whether to automatically check for updates; may be overridden by environment variable {_VALVE_OVERRIDE_ENVIRONMENT_VARIABLE_NAME_PREFIX}CHECK_FOR_UPDATES. Use the 'HTTPS_PROXY' environment variable to control the proxy used for update checks.",
         )
         DEBUG: bool = pydantic.Field(
             default=False,
@@ -150,6 +155,25 @@ class _Action:
         valves = self.valves
         debug = valves.DEBUG
         emitter = self._EventEmitter(__event_emitter__, debug=debug)
+
+        update_check_error = None
+        update_check_notice = ""
+        if valves.CHECK_FOR_UPDATES:
+            if UpdateCheck.need_check():
+                await emitter.status("Checking for updates...")
+            try:
+                newer_version = UpdateCheck.get_newer_version()
+            except UpdateCheck.VersionCheckError as e:
+                update_check_error = e
+                update_check_notice = (
+                    f"\n\n(Failed to check for update to code execution function: {e})"
+                )
+            else:
+                if newer_version is not None:
+                    await emitter.status(f"New version found: {newer_version}")
+                    emitter.set_status_prefix(f"[Update available: {newer_version}] ")
+                    update_check_notice = f"\n\n(Code execution function update available: [{newer_version}]({UpdateCheck.USER_URL}))"
+
         storage = self._UserStorage(
             storage_root_path=os.path.join(
                 valves.WEB_ACCESSIBLE_DIRECTORY_PATH, "user_files"
@@ -162,7 +186,14 @@ class _Action:
         )
 
         async def _fail(error_message, status="SANDBOX_ERROR"):
-            await emitter.fail(error_message)
+            if debug:
+                await emitter.fail(
+                    f"[DEBUG MODE] {error_message}; body={body}; valves=[{valves}]"
+                )
+            elif update_check_error is not None:
+                await emitter.fail(f"[{update_check_error}] {error_message}")
+            else:
+                await emitter.fail(error_message)
             return json.dumps({"status": status, "output": error_message})
 
         await emitter.status("Checking messages for code blocks...")
@@ -337,19 +368,19 @@ class _Action:
                     )
                 if output and len(generated_files) > 0:
                     await emitter.message(
-                        f"\n\n---\nI executed this {language_title} code and got:\n```Output\n{output}\n```\n**Files**:\n{generated_files_output}"
+                        f"\n\n---\nI executed this {language_title} code and got:\n```Output\n{output}\n```\n**Files**:\n{generated_files_output}{update_check_notice}"
                     )
                 elif output and len(generated_files) == 0:
                     await emitter.message(
-                        f"\n\n---\nI executed this {language_title} code and got:\n```Output\n{output}\n```"
+                        f"\n\n---\nI executed this {language_title} code and got:\n```Output\n{output}\n```{update_check_notice}"
                     )
                 elif len(generated_files) > 0:
                     await emitter.message(
-                        f"\n\n---\nI executed this {language_title} code and it generated these files:\n{generated_files_output}"
+                        f"\n\n---\nI executed this {language_title} code and it generated these files:\n{generated_files_output}{update_check_notice}"
                     )
                 else:
                     await emitter.message(
-                        f"\n\n---\nI executed this {language_title} code and it ran successfully with no output."
+                        f"\n\n---\nI executed this {language_title} code and it ran successfully with no output.{update_check_notice}"
                     )
                 return json.dumps(
                     {
@@ -363,19 +394,19 @@ class _Action:
             if status == "TIMEOUT":
                 if output:
                     await emitter.message(
-                        f"\n\n---\nI executed this {language_title} code and it timed out after {self.valves.MAX_RUNTIME_SECONDS} seconds:\n```Error\n{output}\n```\n"
+                        f"\n\n---\nI executed this {language_title} code and it timed out after {self.valves.MAX_RUNTIME_SECONDS} seconds:\n```Error\n{output}\n```\n{update_check_notice}"
                     )
                 else:
                     await emitter.message(
-                        f"\n\n---\nI executed this {language_title} code and it timed out after {self.valves.MAX_RUNTIME_SECONDS} seconds.\n"
+                        f"\n\n---\nI executed this {language_title} code and it timed out after {self.valves.MAX_RUNTIME_SECONDS} seconds.\n{update_check_notice}"
                     )
             if status == "ERROR" and output:
                 await emitter.message(
-                    f"\n\n---\nI executed this {language_title} code and got the following error:\n```Error\n{output}\n```\n"
+                    f"\n\n---\nI executed this {language_title} code and got the following error:\n```Error\n{output}\n```\n{update_check_notice}"
                 )
             else:
                 await emitter.message(
-                    f"\n\n---\nI executed this {language_title} code but got an unexplained error.\n"
+                    f"\n\n---\nI executed this {language_title} code but got an unexplained error.\n{update_check_notice}"
                 )
             return json.dumps({"status": status, "output": output})
         except Sandbox.PlatformNotSupportedException as e:
@@ -401,6 +432,10 @@ class _Action:
         ):
             self.event_emitter = event_emitter
             self._debug = debug
+            self._status_prefix = None
+
+        def set_status_prefix(self, status_prefix):
+            self._status_prefix = status_prefix
 
         async def _emit(self, typ, data):
             if self._debug:
@@ -419,6 +454,8 @@ class _Action:
         async def status(
             self, description="Unknown state", status="in_progress", done=False
         ):
+            if self._status_prefix is not None:
+                description = f"{self._status_prefix}{description}"
             await self._emit(
                 "status",
                 {
@@ -448,6 +485,14 @@ class _Action:
                 "message",
                 {
                     "content": content,
+                },
+            )
+
+        async def code_execution_result(self, output):
+            await self._emit(
+                "code_execution_result",
+                {
+                    "output": output,
                 },
             )
 
@@ -927,6 +972,153 @@ class Action:
         )
 
 
+class SelfFile:
+    """
+    Manages a copy of this file's own contents.
+    """
+
+    _CONTENTS = None
+
+    @classmethod
+    def init(cls):
+        """
+        Read `__file__` into `cls._CONTENTS`. Must be called during init.
+        """
+        if cls._CONTENTS is None:
+            with open(__file__, "rb") as self_f:
+                cls._CONTENTS = self_f.read().decode("utf-8")  # TODO: Use ASCII
+
+    @classmethod
+    def contents(cls) -> str:
+        """
+        Return this file's own contents.
+        """
+        assert cls._CONTENTS is not None, f"{cls.__name__}.init not called"
+        return cls._CONTENTS
+
+
+class UpdateCheck:
+    """
+    Check for updates.
+    """
+
+    RELEASES_URL = (
+        "https://github.com/EtiennePerot/open-webui-code-execution/releases.atom"
+    )
+    USER_URL = "https://github.com/EtiennePerot/open-webui-code-execution/"
+    SELF_VERSION = None
+    LAST_UPDATE_CHECK = None
+    LAST_UPDATE_CACHE = None
+    UPDATE_CHECK_INTERVAL = datetime.timedelta(days=3)
+    VERSION_REGEX = re.compile(r"<title>\s*(v?\d+(?:\.\d+)+)\s*</title>")
+
+    class VersionCheckError(Exception):
+        pass
+
+    @staticmethod
+    def _parse_version(version_str):
+        return tuple(int(c) for c in version_str.strip().removeprefix("v").split("."))
+
+    @staticmethod
+    def _format_version(version):
+        return "v" + ".".join(str(c) for c in version)
+
+    @staticmethod
+    def _compare(version_a, version_b):
+        """
+        Returns -1 if version_a < version_b, 0 if equal, 1 if greater.
+        """
+        for a, b in zip(version_a, version_b):
+            if a < b:
+                return -1
+            if a > b:
+                return 1
+        return len
+
+    @classmethod
+    def _get_current_version(cls):
+        if cls.SELF_VERSION is not None:
+            return cls.SELF_VERSION
+        self_contents = SelfFile.contents().strip()
+        if not self_contents.startswith('"""'):
+            raise cls.VersionCheckError(
+                f"Malformed file contents: {self_contents[:min(8, len(self_contents))]}[...]"
+            )
+        self_contents = self_contents[len('"""') :].strip()
+        version = None
+        for line in self_contents.split("\n"):
+            line = line.strip()
+            if line == '"""':
+                break
+            if line.startswith("version:"):
+                if version is not None:
+                    raise cls.VersionCheckError(
+                        f"Multiple 'version' lines found: {version} and {line}"
+                    )
+                version = line[len("version:") :].strip()
+        if version is None:
+            raise cls.VersionCheckError("Version metadata not found")
+        cls.SELF_VERSION = cls._parse_version(version)
+        return cls.SELF_VERSION
+
+    @classmethod
+    def need_check(cls):
+        if cls.LAST_UPDATE_CHECK is None:
+            return True
+        return (
+            datetime.datetime.now() - cls.LAST_UPDATE_CHECK >= cls.UPDATE_CHECK_INTERVAL
+        )
+
+    @classmethod
+    def _get_latest_version(cls):
+        if not cls.need_check():
+            if type(cls.LAST_UPDATE_CACHE) is type(()):
+                return cls.LAST_UPDATE_CACHE
+            raise cls.LAST_UPDATE_CACHE
+        try:
+            try:
+                releases_xml = urllib.request.urlopen(url=cls.RELEASES_URL).read()
+            except urllib.error.HTTPError as e:
+                cls.LAST_UPDATE_CACHE = cls.VersionCheckError(
+                    f"Failed to retrieve latest version: {e} (URL: {cls.RELEASES_URL})"
+                )
+                raise cls.LAST_UPDATE_CACHE
+            latest_version = None
+            for match in cls.VERSION_REGEX.finditer(releases_xml.decode("utf-8")):
+                version = cls._parse_version(match.group(1))
+                if latest_version is None or cls._compare(version, latest_version) == 1:
+                    latest_version = version
+            if latest_version is None:
+                cls.LAST_UPDATE_CACHE = cls.VersionCheckError(
+                    f"Failed to retrieve latest version: no release found (URL: {cls.RELEASES_URL})"
+                )
+                raise cls.LAST_UPDATE_CACHE
+            cls.LAST_UPDATE_CACHE = latest_version
+            return latest_version
+        finally:
+            cls.LAST_UPDATE_CHECK = datetime.datetime.now()
+
+    @classmethod
+    def get_newer_version(cls) -> typing.Optional[str]:
+        """
+        Check for the latest version and return it if newer than current.
+
+        :raises VersionCheckError: If there was an error checking for version.
+        :return: The latest version number if newer than current, else None.
+        """
+        try:
+            current_version = cls._get_current_version()
+        except cls.VersionCheckError as e:
+            raise e.__class__(f"Checking current version: {e}")
+        try:
+            latest_version = cls._get_latest_version()
+        except cls.VersionCheckError as e:
+            raise e.__class__(f"Checking latest version: {e}")
+        if cls._compare(current_version, latest_version) == -1:
+            return cls._format_version(latest_version)
+        return None
+
+
 class Sandbox:
     """
     Sandbox manages a gVisor sandbox's lifecycle.
@@ -1096,10 +1288,6 @@ class Sandbox:
 
     # Environment variable used to detect interpreter re-execution.
     _MARKER_ENVIRONMENT_VARIABLE = "__CODE_EXECUTION_STAGE"
-
-    # Copy of this file's own contents, for re-execution.
-    # Must be populated at import time using `main`.
-    _SELF_FILE = None
 
     # libc bindings.
     # Populated using `_libc`.
@@ -2039,7 +2227,7 @@ class Sandbox:
                 if not line:
                     continue
                 mount_components = line.split(" ")
-                if len(mount_components) != 10:
+                if len(mount_components) < 10:
                     continue
                 hyphen_index = mount_components.index("-")
                 if hyphen_index < 6:
@@ -2208,12 +2396,10 @@ class Sandbox:
     def main(cls):
         """
         Entry-point for (re-)execution.
-        Populates `cls._SELF_FILE`, so must be called during import.
+        Must be called during import.
         May call `sys.exit` if this is intended to be a code evaluation re-execution.
         """
-        if cls._SELF_FILE is None:
-            with open(__file__, "r") as self_f:
-                cls._SELF_FILE = self_f.read()
+        SelfFile.init()
         if cls._MARKER_ENVIRONMENT_VARIABLE not in os.environ:
             return
         directives = json.load(sys.stdin)
@@ -2608,7 +2794,7 @@ class Sandbox:
         """
         reexec_path = os.path.join(self._tmp_dir, "self.py")
         with open(reexec_path, "w") as reexec_f:
-            reexec_f.write(self._SELF_FILE)
+            reexec_f.write(SelfFile.contents())
         new_env = os.environ.copy()
         new_env[self._MARKER_ENVIRONMENT_VARIABLE] = "1"
         data = json.dumps({"settings": self._settings})
