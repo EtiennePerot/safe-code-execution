@@ -60,6 +60,8 @@ import ctypes.util
 import copy
 import platform
 import re
+import signal
+import threading
 import datetime
 import urllib.error
 
@@ -1854,6 +1856,20 @@ class Sandbox:
                     raise OSError(
                         f"Trying to set max RAM limit to {self._max_sandbox_ram_bytes} bytes: {e}"
                     )
+            for swap_type in ("swap", "zswap"):
+                cgroup_swap_components = tuple(cgroup_components) + (
+                    f"memory.{swap_type}.max",
+                )
+                cgroup_swap_path = self._cgroup_path(*cgroup_swap_components)
+                if not os.path.exists(cgroup_swap_path):
+                    continue
+                try:
+                    with self._open(cgroup_swap_path, "wb") as swap_max_f:
+                        swap_max_f.write("0\n".encode("ascii"))
+                except OSError as e:
+                    raise OSError(
+                        f"Trying to set max {swap_type} limit to 0 bytes: {e}"
+                    )
 
         def _set_supervisor_cgroup_limits(self):
             return self._set_cgroup_limits(
@@ -1935,6 +1951,89 @@ class Sandbox:
                 "cgroup.procs",
             )[:]
             return lambda: _move(sandbox_cgroup_procs_path)
+
+        def monitor_cgroup_resources(self):
+            """
+            Spawns a background thread that monitors resources.
+            cgroups should be taking care of this, but some systems do not
+            enforce this. So this does the same in userspace.
+            Better than nothing.
+
+            :return: A function to cancel the monitor thread.
+            """
+            self_memory_path = self._cgroup_path(
+                self._initial_cgroup_name,
+                self._codeeval_cgroup_name,
+                "memory.peak",
+            )
+            sandbox_procs_path = self._cgroup_path(
+                self._initial_cgroup_name,
+                self._codeeval_cgroup_name,
+                self._CGROUP_SANDBOX_NAME,
+                self._CGROUP_LEAF,
+                "cgroup.procs",
+            )
+
+            def _kill():
+                new_pids_to_kill = True
+                pids_to_kill = set()
+                while new_pids_to_kill:
+                    prev_pids_to_kill_len = len(pids_to_kill)
+                    with self._open(sandbox_procs_path, "rb") as cgroup_procs_f:
+                        for line in cgroup_procs_f:
+                            for pid_str in line.strip().split(b" "):
+                                if not pid_str:
+                                    continue
+                                try:
+                                    pid = int(pid_str)
+                                except ValueError:
+                                    continue
+                                if pid != 0:
+                                    pids_to_kill.add(pid)
+                    for pid_to_kill in pids_to_kill:
+                        try:
+                            os.kill(pid_to_kill, signal.SIGKILL)
+                        except Exception:
+                            pass
+                    new_pids_to_kill = prev_pids_to_kill_len < len(pids_to_kill)
+
+            def _monitor():
+                if self._max_sandbox_ram_bytes is not None:
+                    try:
+                        with self._open(self_memory_path, "rb") as memory_peak_f:
+                            memory_peak_bytes = int(
+                                memory_peak_f.read().decode("ascii").strip()
+                            )
+                        if memory_peak_bytes > self._max_sandbox_ram_bytes:
+                            _kill()
+                    except Exception as e:
+                        print(
+                            f"Warning: Failed to enforce code execution RAM: {e}",
+                            file=sys.stderr,
+                        )
+
+            lock = threading.Lock()
+            enabled = [True]
+
+            def _loop():
+                while True:
+                    time.sleep(0.1)
+                    with lock:
+                        if not enabled[0]:
+                            break
+                    _monitor()
+
+            monitor_thread = threading.Thread(
+                target=_loop, name="Monitor thread for code execution", daemon=True
+            )
+            monitor_thread.start()
+
+            def _cancel():
+                with lock:
+                    enabled[0] = False
+                monitor_thread.join()
+
+            return _cancel
 
     class SandboxException(Exception):
         """
@@ -2596,6 +2695,7 @@ class Sandbox:
             runsc_env = os.environ.copy()
             runsc_env["TMPDIR"] = self._gotmp_dir
             started_marker_path = os.path.join(self._sandbox_shared_path, "started")
+            resource_monitor_cancel = self._switcheroo.monitor_cgroup_resources()
             try:
                 result = subprocess.run(
                     runsc_argv,
@@ -2644,6 +2744,8 @@ class Sandbox:
                 raise self.SandboxRuntimeException(
                     f"Sandbox failed to start: {e} (turn on debug mode to see more information); stderr: {stderr}; logs: {json_logs}"
                 )
+            finally:
+                resource_monitor_cancel()
             if not os.path.isfile(started_marker_path):
                 raise self.SandboxRuntimeException(
                     "Sandbox failed to start up properly"
