@@ -5,18 +5,14 @@
 
 import asyncio
 import argparse
-import datetime
 import json
-import inspect
 import os
 import os.path
 import pydantic
-import re
 import subprocess
 import sys
 import tempfile
 import typing
-import urllib.request
 
 
 class _Tools:
@@ -235,7 +231,7 @@ class _Tools:
                     status = "TIMEOUT"
                     output = e.stderr
                 except Sandbox.InterruptedExecutionError as e:
-                    await emitter.fail(f"Code used too many resources")
+                    await emitter.fail("Code used too many resources")
                     status = "INTERRUPTED"
                     output = e.stderr
                 except Sandbox.CodeExecutionError as e:
@@ -326,10 +322,13 @@ class Tools:
 
 # :: Note: All lines with '# ::' in them in this file will be removed in the
 # :: released version of this tool.
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))  # ::
-from openwebui.event_emitter import EventEmitter  # INLINE_IMPORT
-from safecode.sandbox import Sandbox  # INLINE_IMPORT
-from safecode.update_check import UpdateCheck  # INLINE_IMPORT
+sys.path.append(  # ::
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # ::
+)  # ::
+from openwebui.event_emitter import EventEmitter  # INLINE_IMPORT # noqa: E402
+from safecode.sandbox import Sandbox  # INLINE_IMPORT # noqa: E402
+from safecode.update_check import UpdateCheck  # INLINE_IMPORT # noqa: E402
+
 UpdateCheck.disable()  # ::
 UpdateCheck.init_from_frontmatter(os.path.abspath(__file__))
 

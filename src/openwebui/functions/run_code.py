@@ -6,16 +6,13 @@
 import asyncio
 import argparse
 import base64
-import datetime
 import fcntl
 import json
 import hashlib
-import inspect
 import mimetypes
 import os
 import os.path
 import pydantic
-import re
 import shutil
 import stat
 import subprocess
@@ -283,7 +280,7 @@ class _Action:
                     status = "TIMEOUT"
                     output = e.stderr
                 except Sandbox.InterruptedExecutionError as e:
-                    await emitter.fail(f"Code used too many resources")
+                    await emitter.fail("Code used too many resources")
                     status = "INTERRUPTED"
                     output = e.stderr
                 except Sandbox.CodeExecutionError as e:
@@ -502,7 +499,6 @@ class _Action:
             return self._cached_markdown
 
     class _UserStorage:
-
         class StorageException(Exception):
             """Base class for storage-related exceptions."""
 
@@ -668,7 +664,7 @@ class _Action:
                 <= want_num_bytes + self.MUST_KEEP_FREE_MARGIN_MEGABYTES * 1024 * 1024
             ):
                 raise self.OutOfStorageException(
-                    f"Not enough free disk space for {want_num_bytes} bytes; current free space is {disk_usage_free} bytes and must keep at least {MUST_KEEP_FREE_MARGIN_MEGABYTES} megabytes free"
+                    f"Not enough free disk space for {want_num_bytes} bytes; current free space is {disk_usage_free} bytes and must keep at least {self.MUST_KEEP_FREE_MARGIN_MEGABYTES} megabytes free"
                 )
             user_root_num_files, user_root_num_bytes = self.measure_directory(
                 self._user_path,
@@ -810,9 +806,7 @@ class _Action:
                 elif dirpath.startswith(intake_path + os.sep):
                     relative_dirpath = dirpath[len(intake_path) + len(os.sep) :]
                 else:
-                    assert (
-                        False
-                    ), f"Bad traversal: expected all paths to starts with {intake_path} but got path that does not: {dirpath}"
+                    assert False, f"Bad traversal: expected all paths to starts with {intake_path} but got path that does not: {dirpath}"
                 assert relative_dirpath is not None
                 assert not os.path.isabs(relative_dirpath)
                 copy_dirpath = os.path.join(final_path, relative_dirpath)
@@ -864,10 +858,13 @@ class Action:
 
 # :: Note: All lines with '# ::' in them in this file will be removed in the
 # :: released version of this tool.
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))  # ::
-from openwebui.event_emitter import EventEmitter  # INLINE_IMPORT
-from safecode.sandbox import Sandbox  # INLINE_IMPORT
-from safecode.update_check import UpdateCheck  # INLINE_IMPORT
+sys.path.append(  # ::
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # ::
+)  # ::
+from openwebui.event_emitter import EventEmitter  # INLINE_IMPORT # noqa: E402
+from safecode.sandbox import Sandbox  # INLINE_IMPORT # noqa: E402
+from safecode.update_check import UpdateCheck  # INLINE_IMPORT # noqa: E402
+
 UpdateCheck.disable()  # ::
 UpdateCheck.init_from_frontmatter(os.path.abspath(__file__))
 
@@ -891,7 +888,6 @@ _SAMPLE_PYTHON_INSTRUCTIONS = (
 
 
 def _do_self_tests(debug):
-
     user_storage_path = None
 
     def _want_generated_files(want_generated_files):
@@ -935,7 +931,11 @@ def _do_self_tests(debug):
     def _want_user_storage_num_files(num_files_predicate):
         if type(num_files_predicate) is type(42):
             want_num_files = num_files_predicate
-            num_files_predicate = lambda n: n == want_num_files
+
+            def num_files_predicate_fn(n):
+                return n == want_num_files
+
+            num_files_predicate = num_files_predicate_fn
 
         def _verify():
             total_files = 0

@@ -503,7 +503,10 @@ class Sandbox:
                     op_index = i
                     break
             with self._open(self._log_path, "ab") as log_f:
-                do_log = lambda s: self._log(log_f, s)
+
+                def do_log(s):
+                    return self._log(log_f, s)
+
                 for op, fn in self._operations[op_index + 1 :]:
                     do_log(f"Starting operation: {op}")
                     errors = []
@@ -856,7 +859,7 @@ class Sandbox:
             finally:
                 try:
                     f.close()
-                except OSError as e:
+                except OSError:
                     pass
 
         def _move_process_back(self):
@@ -1010,7 +1013,9 @@ class Sandbox:
             if len(short_code) >= 128:
                 short_code = short_code[:60] + "\u2026" + short_code[-60:]
             if self.stderr:
-                lines = [l.strip() for l in self.stderr.split("\n") if l.strip()]
+                lines = [
+                    line.strip() for line in self.stderr.split("\n") if line.strip()
+                ]
                 if len(lines) >= 2:
                     first_line, last_line = lines[0], lines[-1]
                     return f"{first_line} [\u2026] {last_line} (`{short_code}`)\n{super_str}\n```\n{full_code}\n```"
@@ -1129,7 +1134,7 @@ class Sandbox:
         """
         try:
             cls.check_cgroups()
-        except:
+        except Exception:
             return False
         else:
             return True
@@ -1343,10 +1348,10 @@ class Sandbox:
             )
         else:
             stdout = result.stdout
-            if type(stdout) != type(b""):
+            if type(stdout) is not type(b""):
                 stdout = stdout.encode("utf-8", errors="replace")
             stderr = result.stderr
-            if type(stderr) != type(b""):
+            if type(stderr) is not type(b""):
                 stderr = stderr.encode("utf-8", errors="replace")
             json.dump(
                 {
@@ -1452,7 +1457,7 @@ class Sandbox:
         except Exception as e:
             try:
                 switcheroo_status = self._switcheroo._status()
-            except:
+            except Exception:
                 raise e
             else:
                 raise e.__class__(f"{e}; {switcheroo_status}")
@@ -1495,13 +1500,13 @@ class Sandbox:
         # target path in the sandbox, so they do not expose the host's view of the
         # directory they point to.
         symlinks = set()
-        for l in self.EXPOSED_SYSTEM_DIRECTORIES + self.EXPOSED_SYSTEM_FILES:
-            if not os.path.islink(l):
+        for p in self.EXPOSED_SYSTEM_DIRECTORIES + self.EXPOSED_SYSTEM_FILES:
+            if not os.path.islink(p):
                 continue
-            rootfs_subpath = os.path.join(rootfs_path, l.removeprefix(os.path.sep))
+            rootfs_subpath = os.path.join(rootfs_path, p.removeprefix(os.path.sep))
             os.makedirs(os.path.dirname(rootfs_subpath), mode=0o755, exist_ok=True)
-            os.symlink(src=os.readlink(l), dst=rootfs_subpath)
-            symlinks.add(l)
+            os.symlink(src=os.readlink(p), dst=rootfs_subpath)
+            symlinks.add(p)
 
         # Handle exposed host directories.
         for d in self.EXPOSED_SYSTEM_DIRECTORIES:
@@ -1583,7 +1588,8 @@ class Sandbox:
         ]
 
         # Work around issue that gVisor does not preserve correct UID mappings when running as non-root user in the sandbox.
-        # So map current user to 0:0, then create a new userns immediately before running command and remap to correct UID/GID.
+        # So map current user to 0:0, then create a new user namespace immediately before running command and remap to
+        # correct UID/GID.
         oci_config["process"]["user"]["uid"] = 0
         oci_config["process"]["user"]["gid"] = 0
         oci_config["process"]["args"] = [
@@ -1615,7 +1621,7 @@ class Sandbox:
                 "--rootless=true",
                 "--directfs=false",
                 f"--network={network_mode}",
-                f"--ignore-cgroups=true",  # We already took care of cgroups manually.
+                "--ignore-cgroups=true",  # We already took care of cgroups manually.
                 f"--root={self._runtime_root_path}",
                 f"--debug-log={self._logs_path}/",
                 "run",
@@ -1675,7 +1681,7 @@ class Sandbox:
                 )
             if not os.path.isfile(started_marker_path):
                 raise self.SandboxRuntimeException(
-                    f"Sandbox failed to start up properly"
+                    "Sandbox failed to start up properly"
                 )
             exit_code_path = os.path.join(self._sandbox_shared_path, "exit_code")
             if not os.path.isfile(exit_code_path):
@@ -1740,7 +1746,7 @@ class Sandbox:
                 output = json.loads(result.stdout)
             except json.decoder.JSONDecodeError as e:
                 raise self.SandboxRuntimeException(
-                    f"Subprocess interpreter produced invalid JSON (stdout: {result.stdout})"
+                    f"Subprocess interpreter produced invalid JSON (stdout: {result.stdout}): {e}"
                 )
             if "exception" in output:
                 class_name = output["exception"]["name"]

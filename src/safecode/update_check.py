@@ -1,6 +1,8 @@
 import datetime
 import re
 import typing
+import urllib.error
+import urllib.request
 
 
 class UpdateCheck:
@@ -8,9 +10,7 @@ class UpdateCheck:
     Check for updates.
     """
 
-    RELEASES_URL = (
-        "https://github.com/EtiennePerot/safe-code-execution/releases.atom"
-    )
+    RELEASES_URL = "https://github.com/EtiennePerot/safe-code-execution/releases.atom"
     USER_URL = "https://github.com/EtiennePerot/safe-code-execution/"
     ENABLED = True
     SELF_VERSION = None
@@ -56,7 +56,7 @@ class UpdateCheck:
             raise cls.VersionCheckError(
                 f"Malformed file contents: {contents[:min(8, len(contents))]}[...]"
             )
-        contents = contents[len('"""'):].strip()
+        contents = contents[len('"""') :].strip()
         version = None
         for line in contents.split("\n"):
             line = line.strip()
@@ -67,14 +67,16 @@ class UpdateCheck:
                     raise cls.VersionCheckError(
                         f"Multiple 'version' lines found: {version} and {line}"
                     )
-                version = line[len("version:"):].strip()
+                version = line[len("version:") :].strip()
         if version is None:
             raise cls.VersionCheckError("Version metadata not found")
         cls.SELF_VERSION = cls._parse_version(version)
 
     @classmethod
     def _get_current_version(cls):
-        assert cls.SELF_VERSION is not None, "UpdateCheck.init_from_frontmatter must be called first."
+        assert (
+            cls.SELF_VERSION is not None
+        ), "UpdateCheck.init_from_frontmatter must be called first."
         return cls.SELF_VERSION
 
     @classmethod

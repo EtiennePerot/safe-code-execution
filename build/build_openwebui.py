@@ -28,7 +28,7 @@ _FRONTMATTER_HEADER = {
     "id": "run_code",
     "title": "Run code",
     "description": "Run arbitrary Python or Bash code safely in a gVisor sandbox.",
-    "author": "Etienne Perot",
+    "author": "EtiennePerot",
     "author_url": "https://github.com/EtiennePerot/safe-code-execution",
     "funding_url": "https://github.com/EtiennePerot/safe-code-execution",
     "version": ".".join(str(c) for c in VERSION),
@@ -88,8 +88,14 @@ OUTPUT_FILES = {
     },
 }
 
-_PLAIN_IMPORT_RE = re.compile(r"^import ([_.\w]+(?: as [_\w]+)?(?:, [_.\w]+(?: as [_\w]+)?)*)$")
-_FROM_IMPORT_RE = re.compile(r"^from [_.\w]+ import ([_\w]+(?: as [_\w]+)?(?:, [_\w]+(?: as [_\w]+)?)*)$")
+_PLAIN_IMPORT_RE = re.compile(
+    r"^import ([_.\w]+(?: as [_\w]+)?(?:, [_.\w]+(?: as [_\w]+)?)*)$"
+)
+_FROM_IMPORT_RE = re.compile(
+    r"^from [_.\w]+ import ([_\w]+(?: as [_\w]+)?(?:, [_\w]+(?: as [_\w]+)?)*)$"
+)
+
+
 def get_import_names(import_line):
     comment_index = import_line.find("#")
     if comment_index != -1:
@@ -120,19 +126,26 @@ def get_import_names(import_line):
             else:
                 symbol_name = import_symbol
             symbol_name = symbol_name.strip()
-            assert symbol_name not in symbols, f"Duplicate imported symbol: {symbol_name}"
+            assert (
+                symbol_name not in symbols
+            ), f"Duplicate imported symbol: {symbol_name}"
             symbols.append(symbol_name)
         assert len(symbols) > 0, f"No symbols imported: {import_line}"
         return tuple(symbols)
-    assert not import_line.startswith("import ") and not import_line.startswith("from "), f"Unrecognized import line: {import_line}"
+    assert not import_line.startswith("import ") and not import_line.startswith(
+        "from "
+    ), f"Unrecognized import line: {import_line}"
     return None
+
 
 def process_file(
     template_path,
     frontmatter,
     comment_header,
 ):
-    inline_import_re = re.compile(r"^from ([_.\w]+) import ([_\w]+(?:, [_\w]+)*)\s*# INLINE_IMPORT.*$")
+    inline_import_re = re.compile(
+        r"^from ([_.\w]+) import ([_\w]+(?:, [_\w]+)*)\s*# INLINE_IMPORT.*$"
+    )
     inline_imported_module_names = set()
     inline_imported_symbol_names = set()
 
@@ -147,17 +160,25 @@ def process_file(
         match = inline_import_re.match(inline_import)
         assert match is not None, f"Invalid inline import: {inline_import}"
         module_name, imported_names_str = match.groups()
-        assert module_name not in inline_imported_module_names, f"Duplicate inline import: {module_name}"
+        assert (
+            module_name not in inline_imported_module_names
+        ), f"Duplicate inline import: {module_name}"
         inline_imported_module_names.add(module_name)
-        want_imported_names = frozenset(n.strip() for n in imported_names_str.split(","))
+        want_imported_names = frozenset(
+            n.strip() for n in imported_names_str.split(",")
+        )
         search_paths = (
-            os.path.join(_REPO_DIR, "src", module_name.replace(".", os.sep), "__init__.py"),
+            os.path.join(
+                _REPO_DIR, "src", module_name.replace(".", os.sep), "__init__.py"
+            ),
             os.path.join(_REPO_DIR, "src", module_name.replace(".", os.sep) + ".py"),
         )
         module_path = None
         for search_path in search_paths:
             if os.path.exists(search_path):
-                assert module_path is None, f"Multiple matching files when importing {module_name}"
+                assert (
+                    module_path is None
+                ), f"Multiple matching files when importing {module_name}"
                 module_path = search_path
         assert module_path is not None, f"No matching file when importing {module_name}"
         previous_path = sys.path[:]
@@ -188,9 +209,18 @@ def process_file(
             if imported_name in want_imported_names:
                 got_imported_name.add(imported_name)
                 continue
-            raise ValueError(f"Module '{module_name}' imports symbol '{imported_name}' which is not declared in inline import line '{inline_import}'")
+            if imported_name in inline_imported_symbol_names:
+                raise ValueError(
+                    f"Module '{module_name}' imports symbol '{imported_name}' which is already imported by another inline import"
+                )
+            raise ValueError(
+                f"Module '{module_name}' imports symbol '{imported_name}' which is not declared in inline import line '{inline_import}'"
+            )
         for imported_name in want_imported_names:
-            assert imported_name in got_imported_name, f"Module '{module_name}' was expected to declare symbol '{imported_name}' but it did not"
+            assert (
+                imported_name in got_imported_name
+            ), f"Module '{module_name}' was expected to declare symbol '{imported_name}' but it did not"
+        inline_imported_symbol_names.update(want_imported_names)
         return module_imports, module_body
 
     with open(template_path, "rb") as template_f:
@@ -206,7 +236,9 @@ def process_file(
             ordered_imports.extend(extra_imports)
             lines = module_body + ["", ""]
         for line in lines:
-            assert "# INLINE_IMPORT" not in line, "Recursive inline imports not supported yet"
+            assert (
+                "# INLINE_IMPORT" not in line
+            ), "Recursive inline imports not supported yet"
             assert "# ::" not in line, "Cannot use '# ::' outside of main template"
             if line.startswith("import ") or line.startswith("from "):
                 ordered_imports.append(line)
@@ -219,15 +251,23 @@ def process_file(
             continue
         already_imported.add(imp)
         combined_imports.append(imp)
-    output = "\n\n".join((
-        '"""\n' + '\n'.join(f"{k}: {v}" for k, v in frontmatter.items()) + '\n"""',
-        comment_header,
-        "\n".join(combined_imports),
-        "\n".join(output_body),
-    )) + "\n"
+    output = (
+        "\n\n".join(
+            (
+                '"""\n'
+                + "\n".join(f"{k}: {v}" for k, v in frontmatter.items())
+                + '\n"""',
+                comment_header.rstrip(),
+                "\n".join(combined_imports),
+                "\n".join(output_body),
+            )
+        )
+        + "\n"
+    )
     while "\n\n\n\n" in output:
         output = output.replace("\n\n\n\n", "\n\n\n")
     return output
+
 
 error = False
 for output_path, arguments in OUTPUT_FILES.items():
@@ -238,7 +278,10 @@ for output_path, arguments in OUTPUT_FILES.items():
     want_contents = process_file(**arguments)
     if args.mode == "check":
         if current_contents != want_contents:
-            print(f"ERROR: Contents of {output_path} do not match the codebase; use --mode=build to overwrite.", file=sys.stderr)
+            print(
+                f"ERROR: Contents of {output_path} do not match the codebase; use --mode=build to overwrite.",
+                file=sys.stderr,
+            )
             error = True
     elif args.mode == "build":
         if current_contents != want_contents:
