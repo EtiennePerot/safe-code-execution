@@ -26,6 +26,7 @@
 		"newcgroup",
 		"NEWNS",
 		"noninteractive",
+		"openwebui",
 		"preexec",
 		"procps",
 		"procs",
@@ -36,6 +37,7 @@
 		"RDONLY",
 		"RDWR",
 		"reexec",
+		"safecode",
 		"sandboxing",
 		"selftest",
 		"SHLVL",
@@ -45,6 +47,7 @@
 		"submounts",
 		"syscall",
 		"UNSTARTED",
+		"updatecheck",
 		"urandom",
 		"webui"
 	]

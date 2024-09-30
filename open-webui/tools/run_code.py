@@ -2,12 +2,13 @@
 id: run_code
 title: Run code
 description: Run arbitrary Python or Bash code safely in a gVisor sandbox.
-author: EtiennePerot
+author: Etienne Perot
 author_url: https://github.com/EtiennePerot/safe-code-execution
 funding_url: https://github.com/EtiennePerot/safe-code-execution
 version: 0.7.0
 license: Apache-2.0
 """
+
 
 # NOTE: If running Open WebUI in a container, you *need* to set up this container to allow sandboxed code execution.
 # Please read the docs here:
@@ -18,10 +19,11 @@ license: Apache-2.0
 # If you are looking for an OpenWebUI *function* to allow you to manually execute blocks
 # of code in the LLM output, see here instead:
 # https://openwebui.com/f/etienneperot/run_code/
+
 #
 # See https://github.com/EtiennePerot/safe-code-execution for more info.
 #
-# Protip: You can test this tool manually by running it as a Python script, like so:
+# Protip: You can test this manually by running it as a Python script, like so:
 # (Run this inside the Open WebUI container)
 #
 #   python3 run_code.py --self_test
@@ -33,29 +35,29 @@ license: Apache-2.0
 #   echo 'print("Hello world!")' | python3 run_code.py
 #
 
+
 import asyncio
 import argparse
-import base64
-import ctypes
-import ctypes.util
-import contextlib
-import copy
 import datetime
 import json
-import hashlib
 import inspect
 import os
 import os.path
-import platform
 import pydantic
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
-import time
 import typing
 import urllib.request
+import base64
+import ctypes
+import ctypes.util
+import copy
+import hashlib
+import platform
+import shutil
+import time
 
 
 class _Tools:
@@ -168,92 +170,6 @@ class _Tools:
             ensure_ascii=False,
         )
 
-    class _EventEmitter:
-        """
-        Helper wrapper for event emissions.
-        """
-
-        def __init__(
-            self,
-            event_emitter: typing.Callable[[dict], typing.Any] = None,
-            debug: bool = False,
-        ):
-            self.event_emitter = event_emitter
-            self._debug = debug
-            self._status_prefix = None
-
-        def set_status_prefix(self, status_prefix):
-            self._status_prefix = status_prefix
-
-        async def _emit(self, typ, data):
-            if self._debug:
-                print(f"Emitting {typ} event: {data}", file=sys.stderr)
-            if not self.event_emitter:
-                return None
-            maybe_future = self.event_emitter(
-                {
-                    "type": typ,
-                    "data": data,
-                }
-            )
-            if asyncio.isfuture(maybe_future) or inspect.isawaitable(maybe_future):
-                return await maybe_future
-
-        async def status(
-            self, description="Unknown state", status="in_progress", done=False
-        ):
-            if self._status_prefix is not None:
-                description = f"{self._status_prefix}{description}"
-            await self._emit(
-                "status",
-                {
-                    "status": status,
-                    "description": description,
-                    "done": done,
-                },
-            )
-            if not done and len(description) <= 1024:
-                # Emit it again; Open WebUI does not seem to flush this reliably.
-                # Only do it for relatively small statuses; when debug mode is enabled,
-                # this can take up a lot of space.
-                await self._emit(
-                    "status",
-                    {
-                        "status": status,
-                        "description": description,
-                        "done": done,
-                    },
-                )
-
-        async def fail(self, description="Unknown error"):
-            await self.status(description=description, status="error", done=True)
-
-        async def message(self, content):
-            await self._emit(
-                "message",
-                {
-                    "content": content,
-                },
-            )
-
-        async def citation(self, document, metadata, source):
-            await self._emit(
-                "citation",
-                {
-                    "document": document,
-                    "metadata": metadata,
-                    "source": source,
-                },
-            )
-
-        async def code_execution_result(self, output):
-            await self._emit(
-                "code_execution_result",
-                {
-                    "output": output,
-                },
-            )
-
     async def _run_code(
         self,
         language: str,
@@ -271,7 +187,7 @@ class _Tools:
         """
         valves = self.valves
         debug = valves.DEBUG
-        emitter = self._EventEmitter(event_emitter, debug=debug)
+        emitter = EventEmitter(event_emitter, debug=debug)
 
         if valves.CHECK_FOR_UPDATES:
             if UpdateCheck.need_check():
@@ -449,151 +365,91 @@ class Tools:
         )
 
 
-class SelfFile:
+class EventEmitter:
     """
-    Manages a copy of this file's own contents.
-    """
-
-    _CONTENTS = None
-
-    @classmethod
-    def init(cls):
-        """
-        Read `__file__` into `cls._CONTENTS`. Must be called during init.
-        """
-        if cls._CONTENTS is None:
-            with open(__file__, "rb") as self_f:
-                cls._CONTENTS = self_f.read().decode("ascii")
-
-    @classmethod
-    def contents(cls) -> str:
-        """
-        Return this file's own contents.
-        """
-        assert cls._CONTENTS is not None, f"{cls.__name__}.init not called"
-        return cls._CONTENTS
-
-
-class UpdateCheck:
-    """
-    Check for updates.
+    Helper wrapper for OpenWebUI event emissions.
     """
 
-    RELEASES_URL = (
-        "https://github.com/EtiennePerot/safe-code-execution/releases.atom"
-    )
-    USER_URL = "https://github.com/EtiennePerot/safe-code-execution/"
-    SELF_VERSION = None
-    LAST_UPDATE_CHECK = None
-    LAST_UPDATE_CACHE = None
-    UPDATE_CHECK_INTERVAL = datetime.timedelta(days=3)
-    VERSION_REGEX = re.compile(r"<title>\s*(v?\d+(?:\.\d+)+)\s*</title>")
+    def __init__(
+        self,
+        event_emitter: typing.Callable[[dict], typing.Any] = None,
+        debug: bool = False,
+    ):
+        self.event_emitter = event_emitter
+        self._debug = debug
+        self._status_prefix = None
 
-    class VersionCheckError(Exception):
-        pass
+    def set_status_prefix(self, status_prefix):
+        self._status_prefix = status_prefix
 
-    @staticmethod
-    def _parse_version(version_str):
-        return tuple(int(c) for c in version_str.strip().removeprefix("v").split("."))
+    async def _emit(self, typ, data):
+        if self._debug:
+            print(f"Emitting {typ} event: {data}", file=sys.stderr)
+        if not self.event_emitter:
+            return None
+        maybe_future = self.event_emitter(
+            {
+                "type": typ,
+                "data": data,
+            }
+        )
+        if asyncio.isfuture(maybe_future) or inspect.isawaitable(maybe_future):
+            return await maybe_future
 
-    @staticmethod
-    def _format_version(version):
-        return "v" + ".".join(str(c) for c in version)
-
-    @staticmethod
-    def _compare(version_a, version_b):
-        """
-        Returns -1 if version_a < version_b, 0 if equal, 1 if greater.
-        """
-        for a, b in zip(version_a, version_b):
-            if a < b:
-                return -1
-            if a > b:
-                return 1
-        return len
-
-    @classmethod
-    def _get_current_version(cls):
-        if cls.SELF_VERSION is not None:
-            return cls.SELF_VERSION
-        self_contents = SelfFile.contents().strip()
-        if not self_contents.startswith('"""'):
-            raise cls.VersionCheckError(
-                f"Malformed file contents: {self_contents[:min(8, len(self_contents))]}[...]"
+    async def status(
+        self, description="Unknown state", status="in_progress", done=False
+    ):
+        if self._status_prefix is not None:
+            description = f"{self._status_prefix}{description}"
+        await self._emit(
+            "status",
+            {
+                "status": status,
+                "description": description,
+                "done": done,
+            },
+        )
+        if not done and len(description) <= 1024:
+            # Emit it again; Open WebUI does not seem to flush this reliably.
+            # Only do it for relatively small statuses; when debug mode is enabled,
+            # this can take up a lot of space.
+            await self._emit(
+                "status",
+                {
+                    "status": status,
+                    "description": description,
+                    "done": done,
+                },
             )
-        self_contents = self_contents[len('"""') :].strip()
-        version = None
-        for line in self_contents.split("\n"):
-            line = line.strip()
-            if line == '"""':
-                break
-            if line.startswith("version:"):
-                if version is not None:
-                    raise cls.VersionCheckError(
-                        f"Multiple 'version' lines found: {version} and {line}"
-                    )
-                version = line[len("version:") :].strip()
-        if version is None:
-            raise cls.VersionCheckError("Version metadata not found")
-        cls.SELF_VERSION = cls._parse_version(version)
-        return cls.SELF_VERSION
 
-    @classmethod
-    def need_check(cls):
-        if cls.LAST_UPDATE_CHECK is None:
-            return True
-        return (
-            datetime.datetime.now() - cls.LAST_UPDATE_CHECK >= cls.UPDATE_CHECK_INTERVAL
+    async def fail(self, description="Unknown error"):
+        await self.status(description=description, status="error", done=True)
+
+    async def message(self, content):
+        await self._emit(
+            "message",
+            {
+                "content": content,
+            },
         )
 
-    @classmethod
-    def _get_latest_version(cls):
-        if not cls.need_check():
-            if type(cls.LAST_UPDATE_CACHE) is type(()):
-                return cls.LAST_UPDATE_CACHE
-            raise cls.LAST_UPDATE_CACHE
-        try:
-            try:
-                releases_xml = urllib.request.urlopen(url=cls.RELEASES_URL).read()
-            except urllib.error.HTTPError as e:
-                cls.LAST_UPDATE_CACHE = cls.VersionCheckError(
-                    f"Failed to retrieve latest version: {e} (URL: {cls.RELEASES_URL})"
-                )
-                raise cls.LAST_UPDATE_CACHE
-            latest_version = None
-            for match in cls.VERSION_REGEX.finditer(releases_xml.decode("utf-8")):
-                version = cls._parse_version(match.group(1))
-                if latest_version is None or cls._compare(version, latest_version) == 1:
-                    latest_version = version
-            if latest_version is None:
-                cls.LAST_UPDATE_CACHE = cls.VersionCheckError(
-                    f"Failed to retrieve latest version: no release found (URL: {cls.RELEASES_URL})"
-                )
-                raise cls.LAST_UPDATE_CACHE
-            cls.LAST_UPDATE_CACHE = latest_version
-            return latest_version
-        finally:
-            cls.LAST_UPDATE_CHECK = datetime.datetime.now()
+    async def citation(self, document, metadata, source):
+        await self._emit(
+            "citation",
+            {
+                "document": document,
+                "metadata": metadata,
+                "source": source,
+            },
+        )
 
-    @classmethod
-    def get_newer_version(cls) -> typing.Optional[str]:
-        """
-        Check for the latest version and return it if newer than current.
-
-        :raises VersionCheckError: If there was an error checking for version.
-        :return: The latest version number if newer than current, else None.
-        """
-        try:
-            current_version = cls._get_current_version()
-        except cls.VersionCheckError as e:
-            raise e.__class__(f"Checking current version: {e}")
-        try:
-            latest_version = cls._get_latest_version()
-        except cls.VersionCheckError as e:
-            raise e.__class__(f"Checking latest version: {e}")
-        if cls._compare(current_version, latest_version) == -1:
-            return cls._format_version(latest_version)
-        return None
+    async def code_execution_result(self, output):
+        await self._emit(
+            "code_execution_result",
+            {
+                "output": output,
+            },
+        )
 
 
 class Sandbox:
@@ -805,6 +661,30 @@ class Sandbox:
         def unshare(self, flags):
             if self._libc.unshare(flags) < 0:
                 raise OSError(f"unshare({flags}) failed")
+
+    class _SelfFile:
+        """
+        Manages a copy of this file's own contents.
+        """
+
+        _CONTENTS = None
+
+        @classmethod
+        def init(cls):
+            """
+            Read `__file__` into `cls._CONTENTS`. Must be called during init.
+            """
+            if cls._CONTENTS is None:
+                with open(__file__, "rb") as self_f:
+                    cls._CONTENTS = self_f.read().decode("ascii")
+
+        @classmethod
+        def contents(cls) -> str:
+            """
+            Return this file's own contents.
+            """
+            assert cls._CONTENTS is not None, f"{cls.__name__}.init not called"
+            return cls._CONTENTS
 
     class _Switcheroo:
         """
@@ -1873,9 +1753,10 @@ class Sandbox:
     def main(cls):
         """
         Entry-point for (re-)execution.
+        Must be called during import.
         May call `sys.exit` if this is intended to be a code evaluation re-execution.
         """
-        SelfFile.init()
+        cls._SelfFile.init()
         if cls._MARKER_ENVIRONMENT_VARIABLE not in os.environ:
             return
         directives = json.load(sys.stdin)
@@ -2270,7 +2151,7 @@ class Sandbox:
         """
         reexec_path = os.path.join(self._tmp_dir, "self.py")
         with open(reexec_path, "w") as reexec_f:
-            reexec_f.write(SelfFile.contents())
+            reexec_f.write(self._SelfFile.contents())
         new_env = os.environ.copy()
         new_env[self._MARKER_ENVIRONMENT_VARIABLE] = "1"
         data = json.dumps({"settings": self._settings})
@@ -2402,6 +2283,146 @@ class Sandbox:
                     all_logs.append((cmd_str, line.decode("utf-8", errors="replace")))
         for filename, log_entry in all_logs:
             write_fn(filename, log_entry)
+
+
+Sandbox.main()
+
+
+class UpdateCheck:
+    """
+    Check for updates.
+    """
+
+    RELEASES_URL = (
+        "https://github.com/EtiennePerot/safe-code-execution/releases.atom"
+    )
+    USER_URL = "https://github.com/EtiennePerot/safe-code-execution/"
+    ENABLED = True
+    SELF_VERSION = None
+    LAST_UPDATE_CHECK = None
+    LAST_UPDATE_CACHE = None
+    UPDATE_CHECK_INTERVAL = datetime.timedelta(days=3)
+    VERSION_REGEX = re.compile(r"<title>\s*(v?\d+(?:\.\d+)+)\s*</title>")
+
+    class VersionCheckError(Exception):
+        pass
+
+    @staticmethod
+    def _parse_version(version_str):
+        return tuple(int(c) for c in version_str.strip().removeprefix("v").split("."))
+
+    @staticmethod
+    def _format_version(version):
+        return "v" + ".".join(str(c) for c in version)
+
+    @staticmethod
+    def _compare(version_a, version_b):
+        """
+        Returns -1 if version_a < version_b, 0 if equal, 1 if greater.
+        """
+        for a, b in zip(version_a, version_b):
+            if a < b:
+                return -1
+            if a > b:
+                return 1
+        return len
+
+    @classmethod
+    def disable(cls):
+        cls.ENABLED = False
+
+    @classmethod
+    def init_from_frontmatter(cls, file_with_frontmatter):
+        if not cls.ENABLED:
+            return
+        with open(file_with_frontmatter, "rb") as f:
+            contents = f.read().decode("ascii").strip()
+        if not contents.startswith('"""'):
+            raise cls.VersionCheckError(
+                f"Malformed file contents: {contents[:min(8, len(contents))]}[...]"
+            )
+        contents = contents[len('"""'):].strip()
+        version = None
+        for line in contents.split("\n"):
+            line = line.strip()
+            if line == '"""':
+                break
+            if line.startswith("version:"):
+                if version is not None:
+                    raise cls.VersionCheckError(
+                        f"Multiple 'version' lines found: {version} and {line}"
+                    )
+                version = line[len("version:"):].strip()
+        if version is None:
+            raise cls.VersionCheckError("Version metadata not found")
+        cls.SELF_VERSION = cls._parse_version(version)
+
+    @classmethod
+    def _get_current_version(cls):
+        assert cls.SELF_VERSION is not None, "UpdateCheck.init_from_frontmatter must be called first."
+        return cls.SELF_VERSION
+
+    @classmethod
+    def need_check(cls):
+        if cls.LAST_UPDATE_CHECK is None:
+            return True
+        return (
+            datetime.datetime.now() - cls.LAST_UPDATE_CHECK >= cls.UPDATE_CHECK_INTERVAL
+        )
+
+    @classmethod
+    def _get_latest_version(cls):
+        if not cls.need_check():
+            if type(cls.LAST_UPDATE_CACHE) is type(()):
+                return cls.LAST_UPDATE_CACHE
+            raise cls.LAST_UPDATE_CACHE
+        try:
+            try:
+                releases_xml = urllib.request.urlopen(url=cls.RELEASES_URL).read()
+            except urllib.error.HTTPError as e:
+                cls.LAST_UPDATE_CACHE = cls.VersionCheckError(
+                    f"Failed to retrieve latest version: {e} (URL: {cls.RELEASES_URL})"
+                )
+                raise cls.LAST_UPDATE_CACHE
+            latest_version = None
+            for match in cls.VERSION_REGEX.finditer(releases_xml.decode("utf-8")):
+                version = cls._parse_version(match.group(1))
+                if latest_version is None or cls._compare(version, latest_version) == 1:
+                    latest_version = version
+            if latest_version is None:
+                cls.LAST_UPDATE_CACHE = cls.VersionCheckError(
+                    f"Failed to retrieve latest version: no release found (URL: {cls.RELEASES_URL})"
+                )
+                raise cls.LAST_UPDATE_CACHE
+            cls.LAST_UPDATE_CACHE = latest_version
+            return latest_version
+        finally:
+            cls.LAST_UPDATE_CHECK = datetime.datetime.now()
+
+    @classmethod
+    def get_newer_version(cls) -> typing.Optional[str]:
+        """
+        Check for the latest version and return it if newer than current.
+
+        :raises VersionCheckError: If there was an error checking for version.
+        :return: The latest version number if newer than current, else None.
+        """
+        if not cls.ENABLED:
+            return None
+        try:
+            current_version = cls._get_current_version()
+        except cls.VersionCheckError as e:
+            raise e.__class__(f"Checking current version: {e}")
+        try:
+            latest_version = cls._get_latest_version()
+        except cls.VersionCheckError as e:
+            raise e.__class__(f"Checking latest version: {e}")
+        if cls._compare(current_version, latest_version) == -1:
+            return cls._format_version(latest_version)
+        return None
+
+
+UpdateCheck.init_from_frontmatter(os.path.abspath(__file__))
 
 
 _SAMPLE_BASH_INSTRUCTIONS = (
@@ -2570,7 +2591,6 @@ def _do_self_tests(debug):
     assert False, "Unreachable"
 
 
-Sandbox.main()
 # Debug utility: Run code from stdin if running as a normal Python script.
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
