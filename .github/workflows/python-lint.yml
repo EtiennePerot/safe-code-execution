@@ -5,16 +5,13 @@ on:
 jobs:
   lint:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.x"]
     steps:
     - name: Checkout
       uses: actions/checkout@v4
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: ${{ matrix.python-version }}
+        python-version: "3.x"
     - name: Lint with Ruff
       run: |
         pip install ruff
