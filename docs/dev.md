@@ -34,6 +34,14 @@ To mitigate these problems, this repository is organized as follows:
 ├── 🏗️ build
 │   │   # Script to generate the contents of `🚢 /open-webui`:
 │   └── 🐍 build_openwebui.py
+├── 🧪 tests
+│   └── 📂 open-webui
+│       ├── 📂 functions
+│       │   │   # Execute self-tests for open-webui/functions/run_code.py:
+│       │   └── 📜 run_code_tests.sh
+│       └── 📂 tools
+│           │   # Execute self-tests for open-webui/tools/run_code.py:
+│           └── 📜 run_code_tests.sh
 └── ❓ docs
     │   # This document:
     └── 📃 dev.md
