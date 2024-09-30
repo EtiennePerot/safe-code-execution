@@ -68,6 +68,106 @@ The below is the minimal subset of changes that `--privileged=true` does that is
     * **Why**: The default SELinux label for containers (`container_t`) does not allow the creation of namespaces, which gVisor requires for additional isolation . The `container_engine_t` label allows this.
     * If you don't have SELinux enabled, this setting does nothing and may be omitted.
 
+<details>
+<summary>
+
+#### Does the "hard way" actually provide more security than privileged mode?
+
+</summary>
+
+**The short answer**: Yes; a container running in privileged mode basically has full access to the host, whereas the subset of security options listed in the "hard way" still provide isolation.
+
+**The long answer**: The most important security aspect that the above setting **do not modify** but that privileged mode does is the set of **[Linux capabilities](https://www.man7.org/linux/man-pages/man7/capabilities.7.html)** granted to the process running in the Open WebUI container. In privileged mode, the container is granted, for example:
+
+* `CAP_NET_ADMIN`, which allows it to reconfigure the kernel's network stack.
+* `CAP_SYS_ADMIN`, which allows it to escape the container and run any process on the host.
+* `CAP_SYS_MODULE`, which allows it to install any kernel module.
+
+You can check this using the `capsh` binary:
+
+```shell
+# Without privileged mode:
+$ docker run --rm ghcr.io/open-webui/open-webui:main sh -c 'apt-get update; apt-get install -y libcap2-bin; capsh --print' | grep 'Bounding set'
+Bounding set =cap_chown,cap_dac_override,cap_fowner,cap_fsetid,cap_kill,cap_setgid,cap_setuid,cap_setpcap,cap_net_bind_service,cap_net_raw,cap_sys_chroot,cap_mknod,cap_audit_write,cap_setfcap
+
+# With privileged mode:
+$ docker run --rm --privileged=true ghcr.io/open-webui/open-webui:main sh -c 'apt-get update; apt-get install -y libcap2-bin; capsh --print' | grep 'Bounding set'
+Bounding set =cap_chown,cap_dac_override,cap_dac_read_search,cap_fowner,cap_fsetid,cap_kill,cap_setgid,cap_setuid,cap_setpcap,cap_linux_immutable,cap_net_bind_service,cap_net_broadcast,cap_net_admin,cap_net_raw,cap_ipc_lock,cap_ipc_owner,cap_sys_module,cap_sys_rawio,cap_sys_chroot,cap_sys_ptrace,cap_sys_pacct,cap_sys_admin,cap_sys_boot,cap_sys_nice,cap_sys_resource,cap_sys_time,cap_sys_tty_config,cap_mknod,cap_lease,cap_audit_write,cap_audit_control,cap_setfcap,cap_mac_override,cap_mac_admin,cap_syslog,cap_wake_alarm,cap_block_suspend,cap_audit_read,cap_perfmon,cap_bpf,cap_checkpoint_restore
+```
+
+To illustrate the difference, here's how an Open WebUI running in privileged mode can get full write access to the host's root filesystem. This will not work in non-privileged mode.
+
+```shell
+$ docker run --rm -it --privileged=true ghcr.io/open-webui/open-webui:main bash
+
+# List the host's block storage devices.
+root@container:/app/backend# lsblk
+NAME   MAJ:MIN RM   SIZE RO TYPE MOUNTPOINTS
+sda      8:0    0 111.8G  0 disk
+├─sda1   8:1    0  63.4G  0 part
+├─sda2   8:2    0   507M  0 part
+├─sda3   8:3    0   128M  0 part
+[...]
+
+# Mount the root block device at `/mnt`.
+root@container:/app/backend# mount /dev/sda1 /mnt
+
+# Full access to the host's root filesystem.
+root@container:/app/backend# tree -L 2 /mnt
+/mnt
+├── bin -> usr/bin
+├── boot
+├── dev
+├── etc
+│   ├── apparmor
+│   ├── apparmor.d
+│   ├── bash.bashrc
+│   ├── crontab
+│   ├── [...]
+│   ├── modprobe.d
+│   ├── modules-load.d
+│   ├── passwd
+│   ├── profile
+│   ├── profile.d
+│   ├── rc.d
+│   ├── shadow
+│   ├── sudoers
+│   ├── sudoers.d
+│   ├── [...]
+│   └── zsh
+├── home
+│   ├── [...]
+│   └── [YOUR_NAME_HERE]
+├── lib -> usr/lib
+├── lib64 -> usr/lib
+├── lost+found
+├── media
+│   ├── [...]
+│   └── autofs
+├── mnt
+├── opt
+│   └── [...]
+├── proc
+├── root
+├── run
+├── sbin -> usr/bin
+├── srv
+│   ├── ftp
+│   └── http
+├── sys
+├── tmp
+├── usr
+│   ├── bin
+│   ├── lib
+│   └── [...]
+└── var
+    ├── [...]
+    └── tmp
+```
+
+While this document will not elaborate on how, it should be fairly obvious how one can escalate to full root access on the host from there.
+
+</details>
 </details>
 
 ## **Optional**: Configuration: Set valves
