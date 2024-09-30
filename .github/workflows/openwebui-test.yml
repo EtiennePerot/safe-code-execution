@@ -1,0 +1,26 @@
+name: Open WebUI test
+on:
+  push: {}
+  pull_request: {}
+jobs:
+  open_webui_test:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.x"
+    - name: Check that open-webui files are up-to-date
+      run: |
+        python build/build_openwebui.py --mode=check
+    - name: Download Open WebUI container image
+      run: |
+        docker pull ghcr.io/open-webui/open-webui:main
+    - name: Run Open WebUI tool self-test
+      run: |
+        ./tests/openwebui/tools/run_code_test.sh
+    - name: Run Open WebUI function self-test
+      run: |
+        ./tests/openwebui/functions/run_code_test.sh
