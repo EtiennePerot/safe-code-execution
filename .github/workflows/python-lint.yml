@@ -1,0 +1,21 @@
+name: Python lint
+on:
+  push: {}
+  pull_request: {}
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.x"]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Lint with Ruff
+      run: |
+        pip install ruff
+        ruff check --output-format=github .
