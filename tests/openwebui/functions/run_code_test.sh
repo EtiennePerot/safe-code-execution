@@ -12,4 +12,4 @@ docker run --rm \
     --mount=type=bind,source=/proc,target=/proc2,readonly=false,bind-recursive=disabled \
     --mount=type=bind,source="$REPO_DIR",target=/test \
     ghcr.io/open-webui/open-webui:main \
-    python3 /test/open-webui/functions/run_code.py --self_test
+    python3 /test/open-webui/functions/run_code.py --self_test "$@"
