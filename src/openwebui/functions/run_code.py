@@ -70,8 +70,8 @@ class _Action:
             description=f"Maximum total size of files to keep around for a given user; may be overridden by environment variable {_VALVE_OVERRIDE_ENVIRONMENT_VARIABLE_NAME_PREFIX}MAX_MEGABYTES_PER_USER.",
         )
         WEB_ACCESSIBLE_DIRECTORY_PATH: str = pydantic.Field(
-            default="/data/cache/functions/run_code",
-            description=f"Path of the directory to write files that should be accessible for user download in; may be overridden by environment variable {_VALVE_OVERRIDE_ENVIRONMENT_VARIABLE_NAME_PREFIX}WEB_ACCESSIBLE_DIRECTORY_PATH.",
+            default="$DATA_DIR/cache/functions/run_code",
+            description=f"Path of the directory to write files that should be accessible for user download in. If it begins by '$DATA_DIR', this will be replaced with the DATA_DIR environment variable. The whole field may be overridden by environment variable {_VALVE_OVERRIDE_ENVIRONMENT_VARIABLE_NAME_PREFIX}WEB_ACCESSIBLE_DIRECTORY_PATH.",
         )
         WEB_ACCESSIBLE_DIRECTORY_URL: str = pydantic.Field(
             default="/cache/functions/run_code",
@@ -566,9 +566,31 @@ class _Action:
             max_files_per_user=None,
             max_bytes_per_user=None,
         ):
+            if storage_root_path.startswith("$DATA_DIR" + os.sep):
+                if "DATA_DIR" not in os.environ:
+                    data_dir = "/app/backend/data"
+                    if not os.path.isdir(data_dir):
+                        if os.path.isdir("/app/backend"):
+                            os.makedirs(data_dir, mode=0o755)
+                        else:
+                            raise self.EnvironmentNeedsSetupException(
+                                f"DATA_DIR specified in user storage configuration ({storage_root_path}), but not specified in environment, and default path '/app/backend/data' does not exist; please create it or configure user storage directory."
+                            )
+                else:
+                    data_dir = os.environ["DATA_DIR"]
+                storage_root_path = os.path.join(
+                    data_dir,
+                    storage_root_path[len("$DATA_DIR" + os.sep) :].lstrip(os.sep),
+                )
             self._storage_root_path = os.path.normpath(
                 os.path.abspath(storage_root_path)
             )
+            try:
+                os.makedirs(self._storage_root_path, mode=0o755, exist_ok=True)
+            except OSError as e:
+                raise self.EnvironmentNeedsSetupException(
+                    f"User storage directory ({self._storage_root_path}) does not exist and cannot automatically create it ({e}); please create it or reconfigure it."
+                )
             self._storage_root_url = storage_root_url.rstrip("/")
             self._date = time.strftime("%Y/%m/%d")
             self._max_files_per_user = max_files_per_user
