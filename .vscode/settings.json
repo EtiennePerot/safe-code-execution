@@ -45,6 +45,7 @@
 		"perfmon",
 		"pids",
 		"preexec",
+		"preinstall",
 		"procps",
 		"procs",
 		"Protip",

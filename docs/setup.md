@@ -16,12 +16,11 @@ If you run Open WebUI inside a container, you will need to adjust its settings t
 
 You can do this the **easy way** (good for single-user setups) by running Open WebUI in privileged mode, or the **hard way** to change the minimal set of things that still allows sandboxing to be possible.
 
-<details>
-<summary>
-
 ### The easy way: Run Open WebUI in privileged mode
 
-</summary>
+<details>
+<summary>If you are running Open WebUI on your own computer, without exposing it to the Internet, and you trust Open WebUI's code, click this section. Otherwise, click "the hard way" below.</summary>
+<br/>
 
 * On **Docker**: Add `--privileged=true` to `docker run`.
 * On **Kubernetes**: Set `spec.securityContext.privileged` to `true`.
@@ -32,14 +31,11 @@ This is adequate for single-user setups not exposed to the outside Internet, whi
 
 </details>
 
-<details>
-<summary>
-
 ### The hard way
 
-</summary>
-
-The below is the minimal subset of changes that `--privileged=true` does that is still necessary for sandboxing to work.
+<details>
+<summary>Click to expand this section describing the minimal subset of changes that <code>--privileged=true</code> does that is still necessary for sandboxing to work.</summary>
+<br/>
 
 * Remove the container's default **system call filter** (`seccomp`):
     * On **Docker**: Add `--security-opt=seccomp=unconfined` to `docker run`.
@@ -68,14 +64,13 @@ The below is the minimal subset of changes that `--privileged=true` does that is
     * **Why**: The default SELinux label for containers (`container_t`) does not allow the creation of namespaces, which gVisor requires for additional isolation . The `container_engine_t` label allows this.
     * If you don't have SELinux enabled, this setting does nothing and may be omitted.
 
-<details>
-<summary>
-
 #### Does the "hard way" actually provide more security than privileged mode?
 
-</summary>
-
 **The short answer**: Yes; a container running in privileged mode basically has full access to the host, whereas the subset of security options listed in the "hard way" still provide isolation.
+
+<details>
+<summary>Expand this section for the longer answer.</summary>
+<br/>
 
 **The long answer**: The most important security aspect that the above setting **do not modify** but that privileged mode does is the set of **[Linux capabilities](https://www.man7.org/linux/man-pages/man7/capabilities.7.html)** granted to the process running in the Open WebUI container. In privileged mode, the container is granted, for example:
 
@@ -170,9 +165,13 @@ While this document will not elaborate on how, it should be fairly obvious how o
 </details>
 </details>
 
-## **Optional**: Configuration: Set valves
+## **Optional** setup
 
-The code execution tool and function have the following valves available:
+### **Optional**: Configuration: Set valves
+
+<details>
+<summary>The code execution tool and function can be configured using valves.</summary>
+<br/>
 
 * **Networking allowed**: Whether or not to let sandboxed code have access to the network.
   * **Note**: If you are running Open WebUI on a LAN, this will expose your LAN.
@@ -191,14 +190,13 @@ The code execution tool and function have the following valves available:
   * This should never be enabled in production setups as it produces a lot of information that isn't necessary for regular use.
   * **When filing a bug report**, please enable this valve, then reproduce the issue in a new chat session, then download the chat log (triple-dot menu → `Download` → `Export chat (.json)`) and attach it to the bug report.
 
+</details>
+
+### **Optional**: Run self-tests
+
 <details>
-<summary>
-
-## **Optional**: Self-test mode
-
-To verify that your setup works, you can run the function and the tool in self-test mode using the `--self_test` flag.
-
-</summary>
+<summary>To verify that your setup works, you can run the function and the tool in self-test mode using the <code>--self_test</code> flag.</summary>
+<br/>
 
 For example, here is a Docker invocation running the `run_code.py` script inside the Open WebUI container image with the above flags:
 
@@ -239,14 +237,12 @@ If all goes well, you should see:
 If you get an error, try to add the `--debug` to each `run_code.py` invocation for extra information, then file a bug.
 
 </details>
+
+### **Optional**: Pre-install gVisor
+
 <details>
-<summary>
-
-## **Optional**: Pre-install gVisor
-
-To avoid the tool having to download and install gVisor on first run, you can **optionally** pre-install gVisor in your Open WebUI container image or environment.
-
-</summary>
+<summary>To avoid the tool having to download and install gVisor on first run, you can <strong>optionally</strong> pre-install gVisor in your Open WebUI container image or environment.</summary>
+<br/>
 
 For example, here is a sample `Dockerfile` that extends the Open WebUI container image and pre-installs gVisor:
 
@@ -266,6 +262,27 @@ RUN wget -O /tmp/runsc "https://storage.googleapis.com/gvisor/releases/release/l
 
 </details>
 
-## **Optional**: Lockdown for production setups
+### **Optional**: Lockdown for production setups
 
-TODO: Document environment variables that take precedence over valves to allow multi-user setups.
+<details>
+<summary>All valves can be overridden using environment variables. Doing so will take precedence over the settings in Open WebUI.</summary>
+<br/>
+
+You may override any valve using environment variables prefixed by `CODE_EVAL_VALVE_OVERRIDE_`. This is recommended for production setups, because this can be done at container definition time and does not depend on Open WebUI's stateful configuration. It is also more straightforward to reason about. Additionally, the default valve settings are set to maximize ease of installation for single-user setups, but are **not suitable for production multi-user setups**.
+
+Using code evaluation in a production multi-user setup requires taking all security precautions. The first such precaution is to **configure Open WebUI for sandboxing using "the hard way"** described above. Running Open WebUI in privileged mode is risky.
+
+Once you have done this, consider setting the following environment variable:
+
+* `CODE_EVAL_VALVE_OVERRIDE_MAX_RUNTIME_SECONDS`: The maximum number of seconds that each sandbox is allowed to run for. **This should be non-zero**.
+* `CODE_EVAL_VALVE_OVERRIDE_MAX_RAM_MEGABYTES`: The maximum amount of memory (in megabytes) that each sandbox is allowed to use. **This should be non-zero**.
+* `CODE_EVAL_VALVE_OVERRIDE_AUTO_INSTALL`: **This should be set to `false`** to disable automatic installation of gVisor. **You should preinstall gVisor** instead, as described in an earlier section.
+* `CODE_EVAL_VALVE_OVERRIDE_DEBUG`: **This should be set to `false`**. Debug information reveals a lot of system information that you do not want to expose to users.
+* `CODE_EVAL_VALVE_OVERRIDE_MAX_FILES_PER_EXECUTION`: The maximum number of newly-created files to retain in each sandbox execution. **This should be non-zero**.
+* `CODE_EVAL_VALVE_OVERRIDE_MAX_FILES_PER_USER`: The maximum number of files that can be stored long-term for a single user. **This should be non-zero**.
+* `CODE_EVAL_VALVE_OVERRIDE_MAX_MEGABYTES_PER_USER`: The maximum amount of total long-term file storage (in megabytes) that each user may use. **This should be non-zero**.
+* `CODE_EVAL_VALVE_OVERRIDE_WEB_ACCESSIBLE_DIRECTORY_PATH`: The directory where user files are stored. **This should be overridden** to prevent it from being modified by users to reveal or overwrite sensitive files in the Open WebUI installation.
+* `CODE_EVAL_VALVE_OVERRIDE_WEB_ACCESSIBLE_DIRECTORY_URL`: The HTTP URL of the directory specified by `CODE_EVAL_VALVE_OVERRIDE_WEB_ACCESSIBLE_DIRECTORY_PATH`. This can start with a `/` to make it domain-relative. **This should be overridden** to prevent users from modifying it in such a way that it tricks other users into clicking unrelated links.
+* `CODE_EVAL_VALVE_OVERRIDE_NETWORKING_ALLOWED`: **This should be set to `false`** if running on a LAN with sensitive services that sandboxes could reach out to. Firewall rules are not yet supported, so this setting is currently all-or-nothing.
+
+</details>
