@@ -51,5 +51,5 @@ When users want to install the Open WebUI code execution function or tool,
 they can simply use the file directly in `🚢 /open-webui`.
 
 However, when developing on this extension, you should only modify files in
-`src/`. Then when creating pull requests, ensure that you have refreshed the
+`🍝 /src`. Then when creating pull requests, ensure that you have refreshed the
 files in `🚢 /open-webui` by running the appropriate script in `🏗️ /build`.
