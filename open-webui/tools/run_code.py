@@ -1658,18 +1658,18 @@ class Sandbox:
     @classmethod
     def check_cgroups(cls):
         """
-        Verifies that cgroupfs is mounted and usable for resource limit enforcement.
+        Verifies that cgroupfs is mounted and usable for resource limiting.
 
         :return: Nothing.
-        :raises EnvironmentNeedsSetupException: If cgroupfs is not mounted or unusable for resource limit enforcement.
+        :raises EnvironmentNeedsSetupException: If cgroupfs is not mounted or unusable for resource limiting.
         """
         if not os.path.exists("/sys/fs/cgroup"):
             raise cls.EnvironmentNeedsSetupException(
-                "cgroupfs not mounted as /sys/fs/cgroup but necessary for the sandbox to enforce memory limits; please mount it (`--mount=type=bind,source=/sys/fs/cgroup,target=/sys/fs/cgroup,readonly=false`)"
+                "cgroupfs not mounted as /sys/fs/cgroup but necessary for the sandbox to enforce memory limits; please mount it (`--mount=type=bind,source=/sys/fs/cgroup,target=/sys/fs/cgroup,readonly=false`), or disable resource limiting if appropriate"
             )
         if not os.path.exists("/sys/fs/cgroup/cgroup.subtree_control"):
             raise cls.EnvironmentNeedsSetupException(
-                "/sys/fs/cgroup/cgroup.subtree_control not found; make sure you are using cgroups v2"
+                "/sys/fs/cgroup/cgroup.subtree_control not found; make sure you are using cgroups v2, or disable resource limiting if appropriate"
             )
         # Try to open the file for writing to see if we can actually control cgroups.
         # They may be mounted read-only, as is default with Docker.
@@ -1681,16 +1681,16 @@ class Sandbox:
         except OSError:
             if os.geteuid() != 0:
                 raise cls.EnvironmentNeedsSetupException(
-                    "This script is not running as root, but it needs to do so in order to enforce resource limits; please run as root"
+                    "This script is not running as root, but it needs to do so in order to enforce resource limits; please run as root, or disable resource limiting if appropriate"
                 )
             raise cls.EnvironmentNeedsSetupException(
-                "cgroupfs is not mounted writable but necessary for the sandbox to enforce memory limits; please remount it as writable (`--mount=type=bind,source=/sys/fs/cgroup,target=/sys/fs/cgroup,readonly=false`)"
+                "cgroupfs is not mounted writable but necessary for the sandbox to enforce memory limits; please remount it as writable (`--mount=type=bind,source=/sys/fs/cgroup,target=/sys/fs/cgroup,readonly=false`), or disable resource limiting if appropriate"
             )
         with open("/sys/fs/cgroup/cgroup.controllers", "rb") as subtree_control_f:
             controllers = subtree_control_f.read().decode("ascii").split(" ")
         if "memory" not in controllers:
             raise cls.EnvironmentNeedsSetupException(
-                "cgroupfs does not have the 'memory' controller enabled, necessary to enforce memory limits; please enable it"
+                "cgroupfs does not have the 'memory' controller enabled, necessary to enforce memory limits; please enable it, or disable resource limiting if appropriate"
             )
 
     @classmethod
