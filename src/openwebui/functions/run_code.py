@@ -69,6 +69,10 @@ class _Action:
             default=256,
             description=f"Maximum total size of files to keep around for a given user; may be overridden by environment variable {_VALVE_OVERRIDE_ENVIRONMENT_VARIABLE_NAME_PREFIX}MAX_MEGABYTES_PER_USER.",
         )
+        REQUIRE_RESOURCE_LIMITING: bool = pydantic.Field(
+            default=True,
+            description=f"Whether to enforce resource limiting, which requires cgroups v2 to be available; may be overridden by environment variable {_VALVE_OVERRIDE_ENVIRONMENT_VARIABLE_NAME_PREFIX}REQUIRE_RESOURCE_LIMITING.",
+        )
         WEB_ACCESSIBLE_DIRECTORY_PATH: str = pydantic.Field(
             default="$DATA_DIR/cache/functions/run_code",
             description=f"Path of the directory to write files that should be accessible for user download in. If it begins by '$DATA_DIR', this will be replaced with the DATA_DIR environment variable. The whole field may be overridden by environment variable {_VALVE_OVERRIDE_ENVIRONMENT_VARIABLE_NAME_PREFIX}WEB_ACCESSIBLE_DIRECTORY_PATH.",
@@ -230,6 +234,7 @@ class _Action:
             Sandbox.check_setup(
                 language=language,
                 auto_install_allowed=self.valves.AUTO_INSTALL,
+                require_resource_limiting=self.valves.REQUIRE_RESOURCE_LIMITING,
             )
 
             if self.valves.AUTO_INSTALL and Sandbox.runsc_needs_installation():
@@ -265,6 +270,7 @@ class _Action:
                     networking_allowed=valves.NETWORKING_ALLOWED,
                     max_runtime_seconds=valves.MAX_RUNTIME_SECONDS,
                     max_ram_bytes=max_ram_bytes,
+                    require_resource_limiting=valves.REQUIRE_RESOURCE_LIMITING,
                     persistent_home_dir=sandbox_storage_path,
                 )
 
@@ -1337,6 +1343,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--debug", action="store_true", default=False, help="Enable debug mode."
     )
+    parser.add_argument(
+        "--want_status",
+        type=str,
+        default="",
+        help="If set, verify that the code evaluation status matches this or exit with error code.",
+    )
     args = parser.parse_args()
 
     if args.debug:
@@ -1357,7 +1369,8 @@ if __name__ == "__main__":
 
     async def _local_run():
         def _dummy_emitter(event):
-            print(f"Event: {event}", file=sys.stderr)
+            if not args.want_status:
+                print(f"Event: {event}", file=sys.stderr)
 
         action = Action()
         body = {
@@ -1368,7 +1381,19 @@ if __name__ == "__main__":
                 },
             ],
         }
-        output = await action.action(body=body, __event_emitter__=_dummy_emitter)
-        print(output)
+        output_str = await action.action(body=body, __event_emitter__=_dummy_emitter)
+        if args.want_status:
+            output = json.loads(output_str)
+            got_status = output["status"]
+            if got_status != args.want_status:
+                raise RuntimeError(
+                    f"Code evaluation status is {got_status} but expected {args.want_status}"
+                )
+            print(
+                f"\u2705 Code evaluation status is {got_status} as expected.",
+                file=sys.stderr,
+            )
+        else:
+            print(output_str)
 
     asyncio.run(_local_run())

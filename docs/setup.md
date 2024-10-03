@@ -50,6 +50,7 @@ This is adequate for single-user setups not exposed to the outside Internet, whi
     * On **Docker**: Add `--mount=type=bind,source=/sys/fs/cgroup,target=/sys/fs/cgroup,readonly=false` to `docker run`.
     * On **Kubernetes**: Add a [`hostPath` volume](https://kubernetes.io/docs/concepts/storage/volumes/#hostpath) with `path` set to `/sys/fs/cgroup`, then mount it in your container's `volumeMounts` with options `mountPath` set to `/sys/fs/cgroup` and `readOnly` set to `false`.
     * **Why**: This is needed so that gVisor can create child [cgroups](https://en.wikipedia.org/wiki/Cgroups), necessary to enforce per-sandbox resource usage limits.
+    * If you wish to disable resource limiting on code evaluation sandboxes, you can skip this setting and not mount `cgroupfs` at all in the container. Note that this means code evaluation sandboxes will be able to take as much CPU and memory as they want.
 * **Mount `procfs` at `/proc2`**:
     * On **Docker**: Add `--mount=type=bind,source=/proc,target=/proc2,readonly=false,bind-recursive=disabled` to `docker run`.
     * On **Kubernetes**: Add a [`hostPath` volume](https://kubernetes.io/docs/concepts/storage/volumes/#hostpath) with `path` set to `/proc`, then mount it in your container's `volumeMounts` with options `mountPath` set to `/proc2` and `readOnly` set to `false`.
@@ -179,6 +180,10 @@ While this document will not elaborate on how, it should be fairly obvious how o
   * Useful for multi-user setups to avoid denial-of-service, and to avoid running LLM-generated code that contains infinite loops forever.
 * **Max RAM**: The maximum amount of memory the sandboxed code will be allowed to use, in megabytes.
   * Useful for multi-user setups to avoid denial-of-service.
+* **Resource limiting enforcement**: Whether to enforce that code evaluation sandboxes are resource-limited.
+  * This is enabled by default, and requires cgroups v2 to be present on your system and mounted in the Open WebUI container.
+  * If you do not mind your code evaluation sandboxes being able to use as much CPU and memory as they want, you may disable this setting (set it to `false`).
+  * On systems that only have cgroups v1 and not cgroups v2, such as WSL and some old Linux distributions, you may need to disable this.
 * **Auto install**: Whether to automatically download and install gVisor if not present in the container.
   * If not installed, gVisor will be automatically installed in `/tmp`.
   * You can set the HTTPS proxy used for this download using the `HTTPS_PROXY` environment variable.
@@ -281,6 +286,7 @@ Once you have done this, consider setting the following environment variable:
 * `CODE_EVAL_VALVE_OVERRIDE_MAX_FILES_PER_EXECUTION`: The maximum number of newly-created files to retain in each sandbox execution. **This should be non-zero**.
 * `CODE_EVAL_VALVE_OVERRIDE_MAX_FILES_PER_USER`: The maximum number of files that can be stored long-term for a single user. **This should be non-zero**.
 * `CODE_EVAL_VALVE_OVERRIDE_MAX_MEGABYTES_PER_USER`: The maximum amount of total long-term file storage (in megabytes) that each user may use. **This should be non-zero**.
+* `CODE_EVAL_VALVE_OVERRIDE_REQUIRE_RESOURCE_LIMITING`: Whether to require that code evaluation sandboxes are resource-limited. **This should be set to `true`**.
 * `CODE_EVAL_VALVE_OVERRIDE_WEB_ACCESSIBLE_DIRECTORY_PATH`: The directory where user files are stored. **This should be overridden** to prevent it from being modified by users to reveal or overwrite sensitive files in the Open WebUI installation.
 * `CODE_EVAL_VALVE_OVERRIDE_WEB_ACCESSIBLE_DIRECTORY_URL`: The HTTP URL of the directory specified by `CODE_EVAL_VALVE_OVERRIDE_WEB_ACCESSIBLE_DIRECTORY_PATH`. This can start with a `/` to make it domain-relative. **This should be overridden** to prevent users from modifying it in such a way that it tricks other users into clicking unrelated links.
 * `CODE_EVAL_VALVE_OVERRIDE_NETWORKING_ALLOWED`: **This should be set to `false`** if running on a LAN with sensitive services that sandboxes could reach out to. Firewall rules are not yet supported, so this setting is currently all-or-nothing.

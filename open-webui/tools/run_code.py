@@ -79,6 +79,10 @@ class _Tools:
             default=128,
             description=f"Maximum number of megabytes that the interpreter has when running. Must run as root with host cgroups writable (`--mount=type=bind,source=/sys/fs/cgroup,target=/sys/fs/cgroup,readonly=false`) for this to work. Set to 0 to disable memory limits. May be overridden by environment variable {_VALVE_OVERRIDE_ENVIRONMENT_VARIABLE_NAME_PREFIX}MAX_RAM_MEGABYTES",
         )
+        REQUIRE_RESOURCE_LIMITING: bool = pydantic.Field(
+            default=True,
+            description=f"Whether to enforce resource limiting, which requires cgroups v2 to be available; may be overridden by environment variable {_VALVE_OVERRIDE_ENVIRONMENT_VARIABLE_NAME_PREFIX}REQUIRE_RESOURCE_LIMITING.",
+        )
         AUTO_INSTALL: bool = pydantic.Field(
             default=True,
             description=f"Whether to automatically install gVisor if not installed on the system; may be overridden by environment variable {_VALVE_OVERRIDE_ENVIRONMENT_VARIABLE_NAME_PREFIX}AUTO_INSTALL. Use the 'HTTPS_PROXY' environment variable to control the proxy used for download.",
@@ -225,6 +229,7 @@ class _Tools:
             Sandbox.check_setup(
                 language=language,
                 auto_install_allowed=valves.AUTO_INSTALL,
+                require_resource_limiting=valves.REQUIRE_RESOURCE_LIMITING,
             )
 
             if valves.AUTO_INSTALL and Sandbox.runsc_needs_installation():
@@ -258,6 +263,7 @@ class _Tools:
                     networking_allowed=valves.NETWORKING_ALLOWED,
                     max_runtime_seconds=valves.MAX_RUNTIME_SECONDS,
                     max_ram_bytes=max_ram_bytes,
+                    require_resource_limiting=valves.REQUIRE_RESOURCE_LIMITING,
                     persistent_home_dir=None,
                 )
 
@@ -700,10 +706,11 @@ class Sandbox:
         _CGROUP_SUPERVISOR_NAME = "supervisor"
         _CGROUP_LEAF = "leaf"
 
-        def __init__(self, libc, log_path, max_sandbox_ram_bytes):
+        def __init__(self, libc, log_path, max_sandbox_ram_bytes, do_resource_limiting):
             self._libc = libc
             self._log_path = log_path
             self._max_sandbox_ram_bytes = max_sandbox_ram_bytes
+            self._do_resource_limiting = do_resource_limiting
             self._my_euid = None
             self._my_egid = None
             self._checkpoint = None
@@ -714,7 +721,7 @@ class Sandbox:
             self._initial_cgroup_name = None
             self._codeeval_cgroup_name = None
             self._moved = False
-            self._operations = (
+            self._operations = [
                 # Save EUID and EGID before we move to a new user namespace.
                 ("save_euid", self._save_euid),
                 ("save_egid", self._save_egid),
@@ -723,124 +730,144 @@ class Sandbox:
                 ("write_uid_map", self._write_uid_map),
                 ("write_setgroups", self._write_setgroups),
                 ("write_gid_map", self._write_gid_map),
-                # cgroupfs's view does not take into account cgroup namespaces.
-                # Weird, right?
-                # This means `/proc/PID/cgroup` will show the namespaced view of
-                # the cgroup that the PID is in, but `/sys/fs/cgroup` will still
-                # contain the whole system cgroup hierarchy regardless of namespace.
-                # Instead, namespaces act as "boundary box" around process movement
-                # requests when writing to cgroup.procs or creating new cgroups.
-                # So our first order of business here is to find out which cgroup we
-                # are running in. We do this by scanning the whole cgroupfs hierarchy
-                # and looking for our PID. This will populate
-                # `self._initial_cgroup_name`.
-                ("find_self_in_cgroup_hierarchy", self._find_self_in_cgroup_hierarchy),
-                # The cgroup nesting rules are complicated, but the short of it is:
-                # A cgroup can either **contain processes** OR **have limits**.
-                # Also, cgroups that contain processes must be leaf nodes.
-                # Also, cgroups that enforce limits must have their parent cgroup
-                # also have the same limit "controller" be active.
-                # So we will have two types of cgroups:
-                #  - Leaf nodes with no controllers
-                #  - Non-leaf nodes with controllers
-                # So initially, all the processes in the container's initial
-                # namespace need to be moved out to a new leaf node,
-                # otherwise we cannot turn on controllers on the initial
-                # cgroup.
-                # So we will set up the following hierarchy:
-                #   /sys/fs/cgroup/$INITIAL:
-                #     The cgroup where the container's processes were running
-                #     the first time we run any Sandbox in the container.
-                #     It may initially have no controllers enabled, but we will
-                #     turn them on later.
-                #   /sys/fs/cgroup/$INITIAL/leaf:
-                #     The cgroup where the container's processes are moved to
-                #     from the $INITIAL cgroup upon first run of any Sandbox in
-                #     this container. When this code runs again, processes that
-                #     are already in `$INITIAL/leaf` are not moved.
-                #   /sys/fs/cgroup/$INITIAL/codeeval_$NUM:
-                #     A per-Sandbox cgroup that never contains any processes.
-                #     It will have controllers enabled on it but will never have
-                #     specific limits enforced.
-                #   /sys/fs/cgroup/$INITIAL/codeeval_$NUM/sandbox:
-                #     A per-Sandbox cgroup that never contains any processes.
-                #     It will have controllers enabled on it and will enforce
-                #     resource limits for the processes running in its /leaf.
-                #   /sys/fs/cgroup/$INITIAL/codeeval_$NUM/sandbox/leaf:
-                #     A per-Sandbox cgroup that is running `runsc` (gVisor).
-                #     It has no controllers enabled on it, but resources are
-                #     being enforced by virtue of being a child of
-                #     `$INITIAL/codeeval_$NUM/sandbox` which does enforce limits.
-                #   /sys/fs/cgroup/$INITIAL/codeeval_$NUM/supervisor:
-                #     A per-Sandbox cgroup that never contains any processes.
-                #     It will have controllers enabled on it and will enforce
-                #     resource limits for the processes running in its /leaf.
-                #   /sys/fs/cgroup/$INITIAL/codeeval_$NUM/supervisor/leaf:
-                #     A per-Sandbox cgroup that is running a Python interpreter
-                #     that manages the lifetime of the `runsc` process.
-                #     It will run `Sandbox.maybe_main`.
-                #     It has no controllers enabled on it, but resources are
-                #     being enforced by virtue of being a child of
-                #     `$INITIAL/codeeval_$NUM/sandbox` which does enforce limits.
-                #
-                # This particular step creates the `$INITIAL/leaf` cgroup.
-                # If already created, it does nothing.
-                ("create_initial_leaf_cgroup", self._create_initial_leaf_cgroup),
-                # Move all processes in `$INITIAL` to `$INITIAL/leaf`.
-                (
-                    "move_initial_cgroup_processes_to_initial_leaf_cgroup",
-                    self._move_initial_cgroup_processes_to_initial_leaf_cgroup,
-                ),
-                # Read the cgroup controllers enabled in `$INITIAL`. This acts
-                # as a bounding set on the ones we can enable in any child of it.
-                ("read_cgroup_controllers", self._read_cgroup_controllers),
-                # Cleanup old `$INITIAL/codeeval_*` cgroups that may be lying
-                # around from past runs.
-                ("cleanup_old_cgroups", self._cleanup_old_cgroups),
-                # Create a new `$INITIAL/codeeval_$NUM` cgroup.
-                ("create_codeeval_cgroup", self._create_codeeval_cgroup),
-                # Create a new `$INITIAL/codeeval_$NUM/sandbox` cgroup.
-                ("create_sandbox_cgroup", self._create_sandbox_cgroup),
-                # Create a new `$INITIAL/codeeval_$NUM/sandbox/leaf` cgroup.
-                ("create_sandbox_leaf_cgroup", self._create_sandbox_leaf_cgroup),
-                # Create a new `$INITIAL/codeeval_$NUM/supervisor` cgroup.
-                ("create_supervisor_cgroup", self._create_supervisor_cgroup),
-                # Create a new `$INITIAL/codeeval_$NUM/supervisor/leaf` cgroup.
-                ("create_supervisor_leaf_cgroup", self._create_supervisor_leaf_cgroup),
-                # Add controllers to `$INITIAL`.
-                (
-                    "add_cgroup_controllers_to_root",
-                    self._add_cgroup_controllers_to_root,
-                ),
-                # Add controllers to `$INITIAL/codeeval_$NUM`.
-                (
-                    "add_cgroup_controllers_to_codeeval",
-                    self._add_cgroup_controllers_to_codeeval,
-                ),
-                # Add controllers to `$INITIAL/codeeval_$NUM/sandbox`.
-                (
-                    "add_cgroup_controllers_to_sandbox",
-                    self._add_cgroup_controllers_to_sandbox,
-                ),
-                # Set resource limits on `$INITIAL/codeeval_$NUM`.
-                ("set_sandbox_cgroup_limits", self._set_sandbox_cgroup_limits),
-                # Add controllers to `$INITIAL/codeeval_$NUM/supervisor`.
-                (
-                    "add_cgroup_controllers_to_supervisor",
-                    self._add_cgroup_controllers_to_supervisor,
-                ),
-                # Set resource limits on `$INITIAL/codeeval_$NUM/supervisor`.
-                ("set_supervisor_cgroup_limits", self._set_supervisor_cgroup_limits),
-                # Move current process to
-                # `$INITIAL/codeeval_$NUM/supervisor/leaf`.
-                (
-                    "move_process_to_supervisor_leaf",
-                    self._move_process_to_supervisor_leaf,
-                ),
-                # Double-check that we have moved to
-                # `$INITIAL/codeeval_$NUM/supervisor/leaf`.
-                ("sanity_check_own_cgroup", self._sanity_check_own_cgroup),
-            )
+            ]
+            if do_resource_limiting:
+                self._operations.extend(
+                    (
+                        # cgroupfs's view does not take into account cgroup namespaces.
+                        # Weird, right?
+                        # This means `/proc/PID/cgroup` will show the namespaced view of
+                        # the cgroup that the PID is in, but `/sys/fs/cgroup` will still
+                        # contain the whole system cgroup hierarchy regardless of namespace.
+                        # Instead, namespaces act as "boundary box" around process movement
+                        # requests when writing to cgroup.procs or creating new cgroups.
+                        # So our first order of business here is to find out which cgroup we
+                        # are running in. We do this by scanning the whole cgroupfs hierarchy
+                        # and looking for our PID. This will populate
+                        # `self._initial_cgroup_name`.
+                        (
+                            "find_self_in_cgroup_hierarchy",
+                            self._find_self_in_cgroup_hierarchy,
+                        ),
+                        # The cgroup nesting rules are complicated, but the short of it is:
+                        # A cgroup can either **contain processes** OR **have limits**.
+                        # Also, cgroups that contain processes must be leaf nodes.
+                        # Also, cgroups that enforce limits must have their parent cgroup
+                        # also have the same limit "controller" be active.
+                        # So we will have two types of cgroups:
+                        #  - Leaf nodes with no controllers
+                        #  - Non-leaf nodes with controllers
+                        # So initially, all the processes in the container's initial
+                        # namespace need to be moved out to a new leaf node,
+                        # otherwise we cannot turn on controllers on the initial
+                        # cgroup.
+                        # So we will set up the following hierarchy:
+                        #   /sys/fs/cgroup/$INITIAL:
+                        #     The cgroup where the container's processes were running
+                        #     the first time we run any Sandbox in the container.
+                        #     It may initially have no controllers enabled, but we will
+                        #     turn them on later.
+                        #   /sys/fs/cgroup/$INITIAL/leaf:
+                        #     The cgroup where the container's processes are moved to
+                        #     from the $INITIAL cgroup upon first run of any Sandbox in
+                        #     this container. When this code runs again, processes that
+                        #     are already in `$INITIAL/leaf` are not moved.
+                        #   /sys/fs/cgroup/$INITIAL/codeeval_$NUM:
+                        #     A per-Sandbox cgroup that never contains any processes.
+                        #     It will have controllers enabled on it but will never have
+                        #     specific limits enforced.
+                        #   /sys/fs/cgroup/$INITIAL/codeeval_$NUM/sandbox:
+                        #     A per-Sandbox cgroup that never contains any processes.
+                        #     It will have controllers enabled on it and will enforce
+                        #     resource limits for the processes running in its /leaf.
+                        #   /sys/fs/cgroup/$INITIAL/codeeval_$NUM/sandbox/leaf:
+                        #     A per-Sandbox cgroup that is running `runsc` (gVisor).
+                        #     It has no controllers enabled on it, but resources are
+                        #     being enforced by virtue of being a child of
+                        #     `$INITIAL/codeeval_$NUM/sandbox` which does enforce limits.
+                        #   /sys/fs/cgroup/$INITIAL/codeeval_$NUM/supervisor:
+                        #     A per-Sandbox cgroup that never contains any processes.
+                        #     It will have controllers enabled on it and will enforce
+                        #     resource limits for the processes running in its /leaf.
+                        #   /sys/fs/cgroup/$INITIAL/codeeval_$NUM/supervisor/leaf:
+                        #     A per-Sandbox cgroup that is running a Python interpreter
+                        #     that manages the lifetime of the `runsc` process.
+                        #     It will run `Sandbox.maybe_main`.
+                        #     It has no controllers enabled on it, but resources are
+                        #     being enforced by virtue of being a child of
+                        #     `$INITIAL/codeeval_$NUM/sandbox` which does enforce limits.
+                        #
+                        # This particular step creates the `$INITIAL/leaf` cgroup.
+                        # If already created, it does nothing.
+                        (
+                            "create_initial_leaf_cgroup",
+                            self._create_initial_leaf_cgroup,
+                        ),
+                        # Move all processes in `$INITIAL` to `$INITIAL/leaf`.
+                        (
+                            "move_initial_cgroup_processes_to_initial_leaf_cgroup",
+                            self._move_initial_cgroup_processes_to_initial_leaf_cgroup,
+                        ),
+                        # Read the cgroup controllers enabled in `$INITIAL`. This acts
+                        # as a bounding set on the ones we can enable in any child of it.
+                        ("read_cgroup_controllers", self._read_cgroup_controllers),
+                        # Cleanup old `$INITIAL/codeeval_*` cgroups that may be lying
+                        # around from past runs.
+                        ("cleanup_old_cgroups", self._cleanup_old_cgroups),
+                        # Create a new `$INITIAL/codeeval_$NUM` cgroup.
+                        ("create_codeeval_cgroup", self._create_codeeval_cgroup),
+                        # Create a new `$INITIAL/codeeval_$NUM/sandbox` cgroup.
+                        ("create_sandbox_cgroup", self._create_sandbox_cgroup),
+                        # Create a new `$INITIAL/codeeval_$NUM/sandbox/leaf` cgroup.
+                        (
+                            "create_sandbox_leaf_cgroup",
+                            self._create_sandbox_leaf_cgroup,
+                        ),
+                        # Create a new `$INITIAL/codeeval_$NUM/supervisor` cgroup.
+                        ("create_supervisor_cgroup", self._create_supervisor_cgroup),
+                        # Create a new `$INITIAL/codeeval_$NUM/supervisor/leaf` cgroup.
+                        (
+                            "create_supervisor_leaf_cgroup",
+                            self._create_supervisor_leaf_cgroup,
+                        ),
+                        # Add controllers to `$INITIAL`.
+                        (
+                            "add_cgroup_controllers_to_root",
+                            self._add_cgroup_controllers_to_root,
+                        ),
+                        # Add controllers to `$INITIAL/codeeval_$NUM`.
+                        (
+                            "add_cgroup_controllers_to_codeeval",
+                            self._add_cgroup_controllers_to_codeeval,
+                        ),
+                        # Add controllers to `$INITIAL/codeeval_$NUM/sandbox`.
+                        (
+                            "add_cgroup_controllers_to_sandbox",
+                            self._add_cgroup_controllers_to_sandbox,
+                        ),
+                        # Set resource limits on `$INITIAL/codeeval_$NUM`.
+                        ("set_sandbox_cgroup_limits", self._set_sandbox_cgroup_limits),
+                        # Add controllers to `$INITIAL/codeeval_$NUM/supervisor`.
+                        (
+                            "add_cgroup_controllers_to_supervisor",
+                            self._add_cgroup_controllers_to_supervisor,
+                        ),
+                        # Set resource limits on `$INITIAL/codeeval_$NUM/supervisor`.
+                        (
+                            "set_supervisor_cgroup_limits",
+                            self._set_supervisor_cgroup_limits,
+                        ),
+                        # Move current process to
+                        # `$INITIAL/codeeval_$NUM/supervisor/leaf`.
+                        (
+                            "move_process_to_supervisor_leaf",
+                            self._move_process_to_supervisor_leaf,
+                        ),
+                        # Double-check that we have moved to
+                        # `$INITIAL/codeeval_$NUM/supervisor/leaf`.
+                        ("sanity_check_own_cgroup", self._sanity_check_own_cgroup),
+                    )
+                )
 
         def _status(self):
             """
@@ -854,62 +881,65 @@ class Sandbox:
             if self._checkpoint == self._operations[-1][0]:
                 main_status = "OK"
             my_pid = os.getpid()
-            status_line = f"{main_status} (euid={self._my_euid} egid={self._my_egid} pid={my_pid} initial_cgroup_name={self._initial_cgroup_name} codeeval_cgroup_name={self._codeeval_cgroup_name} controllers={self._cgroup_controllers})"
-            cgroupfs_data = []
-            for cgroup_components in (
-                (self._initial_cgroup_name,),
-                (self._initial_cgroup_name, self._CGROUP_LEAF),
-                (self._initial_cgroup_name, self._codeeval_cgroup_name),
-                (
-                    self._initial_cgroup_name,
-                    self._codeeval_cgroup_name,
-                    self._CGROUP_LEAF,
-                ),
-                (
-                    self._initial_cgroup_name,
-                    self._codeeval_cgroup_name,
-                    self._CGROUP_SUPERVISOR_NAME,
-                ),
-                (
-                    self._initial_cgroup_name,
-                    self._codeeval_cgroup_name,
-                    self._CGROUP_SUPERVISOR_NAME,
-                    self._CGROUP_LEAF,
-                ),
-                (
-                    self._initial_cgroup_name,
-                    self._codeeval_cgroup_name,
-                    self._CGROUP_SANDBOX_NAME,
-                ),
-                (
-                    self._initial_cgroup_name,
-                    self._codeeval_cgroup_name,
-                    self._CGROUP_SANDBOX_NAME,
-                    self._CGROUP_LEAF,
-                ),
-            ):
-                if any(c is None for c in cgroup_components):
-                    continue
-                file_data = []
-                for filename in ("procs", "controllers", "subtree_control"):
-                    data = None
-                    try:
-                        with self._open(
-                            self._cgroup_path(
-                                *(cgroup_components + (f"cgroup.{filename}",))
-                            ),
-                            "rb",
-                        ) as f:
-                            data = f.read().decode("ascii").replace("\n", " ")
-                    except Exception as e:
-                        data = f"[fail: {e}]"
-                    file_data.append(f"{filename}: {data}")
-                cgroup_components_joined = os.sep.join(cgroup_components)
-                file_data_joined = ", ".join(file_data)
-                cgroupfs_data.append(f"{cgroup_components_joined}=[{file_data_joined}]")
-            if len(cgroupfs_data) > 0:
-                cgroupfs_data_joined = " ".join(cgroupfs_data)
-                status_line += f" {cgroupfs_data_joined}"
+            status_line = f"{main_status} (euid={self._my_euid} egid={self._my_egid} pid={my_pid} do_resource_limiting={self._do_resource_limiting} initial_cgroup_name={self._initial_cgroup_name} codeeval_cgroup_name={self._codeeval_cgroup_name} controllers={self._cgroup_controllers})"
+            if self._do_resource_limiting:
+                cgroupfs_data = []
+                for cgroup_components in (
+                    (self._initial_cgroup_name,),
+                    (self._initial_cgroup_name, self._CGROUP_LEAF),
+                    (self._initial_cgroup_name, self._codeeval_cgroup_name),
+                    (
+                        self._initial_cgroup_name,
+                        self._codeeval_cgroup_name,
+                        self._CGROUP_LEAF,
+                    ),
+                    (
+                        self._initial_cgroup_name,
+                        self._codeeval_cgroup_name,
+                        self._CGROUP_SUPERVISOR_NAME,
+                    ),
+                    (
+                        self._initial_cgroup_name,
+                        self._codeeval_cgroup_name,
+                        self._CGROUP_SUPERVISOR_NAME,
+                        self._CGROUP_LEAF,
+                    ),
+                    (
+                        self._initial_cgroup_name,
+                        self._codeeval_cgroup_name,
+                        self._CGROUP_SANDBOX_NAME,
+                    ),
+                    (
+                        self._initial_cgroup_name,
+                        self._codeeval_cgroup_name,
+                        self._CGROUP_SANDBOX_NAME,
+                        self._CGROUP_LEAF,
+                    ),
+                ):
+                    if any(c is None for c in cgroup_components):
+                        continue
+                    file_data = []
+                    for filename in ("procs", "controllers", "subtree_control"):
+                        data = None
+                        try:
+                            with self._open(
+                                self._cgroup_path(
+                                    *(cgroup_components + (f"cgroup.{filename}",))
+                                ),
+                                "rb",
+                            ) as f:
+                                data = f.read().decode("ascii").replace("\n", " ")
+                        except Exception as e:
+                            data = f"[fail: {e}]"
+                        file_data.append(f"{filename}: {data}")
+                    cgroup_components_joined = os.sep.join(cgroup_components)
+                    file_data_joined = ", ".join(file_data)
+                    cgroupfs_data.append(
+                        f"{cgroup_components_joined}=[{file_data_joined}]"
+                    )
+                if len(cgroupfs_data) > 0:
+                    cgroupfs_data_joined = " ".join(cgroupfs_data)
+                    status_line += f" {cgroupfs_data_joined}"
             return status_line
 
         def _cgroup_path(self, *components):
@@ -1374,6 +1404,8 @@ class Sandbox:
             :return: A function to move the current process to the sandbox cgroup.
             :raises SandboxException: If not queried after we have already chosen a new cgroup name.
             """
+            if not self._do_resource_limiting:
+                return lambda: None
             if self._codeeval_cgroup_name is None:
                 raise Sandbox.SandboxException(
                     "Tried to move process to sandbox leaf cgroup before we know it"
@@ -1424,13 +1456,15 @@ class Sandbox:
 
         def monitor_cgroup_resources(self):
             """
-            Spawns a background thread that monitors resources.
+            Spawns a background thread that monitors resources, if limiting is enabled.
             cgroups should be taking care of this, but some systems do not
             enforce this. So this does the same in userspace.
             Better than nothing.
 
-            :return: A function to cancel the monitor thread.
+            :return: A function to cancel the monitor thread, if resource limiting is enabled.
             """
+            if not self._do_resource_limiting:
+                return lambda: None
             self_memory_path = self._cgroup_path(
                 self._initial_cgroup_name,
                 self._codeeval_cgroup_name,
@@ -1660,20 +1694,6 @@ class Sandbox:
             )
 
     @classmethod
-    def cgroups_available(cls) -> bool:
-        """
-        Returns whether cgroupfs is mounted and usable for resource limit enforcement.
-
-        :return: Whether cgroupfs is mounted and usable for resource limit enforcement.
-        """
-        try:
-            cls.check_cgroups()
-        except Exception:
-            return False
-        else:
-            return True
-
-    @classmethod
     def check_procfs(cls):
         """
         Verifies that we have an unobstructed view of procfs.
@@ -1816,12 +1836,18 @@ class Sandbox:
             os.rename(download_path, cls.AUTO_INSTALLATION_PATH)
 
     @classmethod
-    def check_setup(cls, language: str, auto_install_allowed: bool):
+    def check_setup(
+        cls,
+        language: str,
+        auto_install_allowed: bool,
+        require_resource_limiting: bool,
+    ):
         """
         Verifies that the environment is compatible with running sandboxes.
 
         :param language: The programming language to run.
         :param auto_install_allowed: Whether auto-installation of `runsc` is allowed.
+        :param require_resource_limiting: Check that the host supports resource limiting via cgroups.
 
         :return: Nothing.
         :raises ValueError: If provided an invalid language name.
@@ -1840,7 +1866,8 @@ class Sandbox:
             )
         cls.check_platform()
         cls.check_unshare()
-        cls.check_cgroups()
+        if require_resource_limiting:
+            cls.check_cgroups()
         cls.check_procfs()
         if not auto_install_allowed and cls.get_runsc_path() is None:
             raise cls.GVisorNotInstalledException(
@@ -1910,8 +1937,9 @@ class Sandbox:
         debug: bool,
         networking_allowed: bool,
         max_runtime_seconds: int,
-        max_ram_bytes: typing.Optional[int],
-        persistent_home_dir: typing.Optional[str],
+        max_ram_bytes: typing.Optional[int] = None,
+        require_resource_limiting: bool = False,
+        persistent_home_dir: typing.Optional[str] = None,
     ):
         """
         Constructor.
@@ -1923,6 +1951,7 @@ class Sandbox:
         :param networking_allowed: Whether the code should be given access to the network.
         :param max_runtime_seconds: How long the code should be allowed to run, in seconds.
         :param max_ram_bytes: How many bytes of RAM the interpreter should be allowed to use, or `None` for no limit.
+        :param require_resource_limiting: If true, refuse to launch a sandbox if the host doesn't support resource limiting via cgroups.
         :param persistent_home_dir: Optional directory which will be mapped read-write to this real host directory.
         """
         self._init(
@@ -1934,6 +1963,7 @@ class Sandbox:
                 "networking_allowed": networking_allowed,
                 "max_runtime_seconds": max_runtime_seconds,
                 "max_ram_bytes": max_ram_bytes,
+                "require_resource_limiting": require_resource_limiting,
                 "persistent_home_dir": persistent_home_dir,
             }
         )
@@ -1952,13 +1982,12 @@ class Sandbox:
         self._networking_allowed = self._settings["networking_allowed"]
         self._max_runtime_seconds = self._settings["max_runtime_seconds"]
         self._max_ram_bytes = self._settings["max_ram_bytes"]
+        self._require_resource_limiting = self._settings[
+            "require_resource_limiting"
+        ] or all((self._max_ram_bytes is None,))
         self._persistent_home_dir = self._settings["persistent_home_dir"]
         self._sandboxed_command = None
-        self._switcheroo = self._Switcheroo(
-            libc=self._libc(),
-            log_path=os.path.join(self._logs_path, "switcheroo.txt"),
-            max_sandbox_ram_bytes=self._max_ram_bytes,
-        )
+        self._switcheroo = None
 
     def _setup_sandbox(self):
         """
@@ -1985,7 +2014,18 @@ class Sandbox:
                     f"Persistent home directory {self._persistent_home_dir} does not exist"
                 )
         oci_config["root"]["path"] = rootfs_path
-
+        do_resource_limiting = True
+        if not self._require_resource_limiting:
+            try:
+                self.check_cgroups()
+            except self.EnvironmentNeedsSetupException:
+                do_resource_limiting = False
+        self._switcheroo = self._Switcheroo(
+            libc=self._libc(),
+            log_path=os.path.join(self._logs_path, "switcheroo.txt"),
+            max_sandbox_ram_bytes=self._max_ram_bytes,
+            do_resource_limiting=do_resource_limiting,
+        )
         try:
             self._switcheroo.do()
         except Exception as e:
@@ -2725,6 +2765,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--debug", action="store_true", default=False, help="Enable debug mode."
     )
+    parser.add_argument(
+        "--want_status",
+        type=str,
+        default="",
+        help="If set, verify that the code evaluation status matches this or exit with error code.",
+    )
     args = parser.parse_args()
 
     if args.debug:
@@ -2745,17 +2791,30 @@ if __name__ == "__main__":
 
     async def _local_run():
         def _dummy_emitter(event):
-            print(f"Event: {event}", file=sys.stderr)
+            if not args.want_status:
+                print(f"Event: {event}", file=sys.stderr)
 
         tools = Tools()
         if args.language == "bash":
-            output = await tools.run_bash_command(
+            output_str = await tools.run_bash_command(
                 bash_command=code, __event_emitter__=_dummy_emitter
             )
         else:
-            output = await tools.run_python_code(
+            output_str = await tools.run_python_code(
                 python_code=code, __event_emitter__=_dummy_emitter
             )
-        print(output)
+        if args.want_status:
+            output = json.loads(output_str)
+            got_status = output["status"]
+            if got_status != args.want_status:
+                raise RuntimeError(
+                    f"Code evaluation status is {got_status} but expected {args.want_status}"
+                )
+            print(
+                f"\u2705 Code evaluation status is {got_status} as expected.",
+                file=sys.stderr,
+            )
+        else:
+            print(output_str)
 
     asyncio.run(_local_run())

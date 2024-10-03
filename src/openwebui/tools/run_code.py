@@ -32,6 +32,10 @@ class _Tools:
             default=128,
             description=f"Maximum number of megabytes that the interpreter has when running. Must run as root with host cgroups writable (`--mount=type=bind,source=/sys/fs/cgroup,target=/sys/fs/cgroup,readonly=false`) for this to work. Set to 0 to disable memory limits. May be overridden by environment variable {_VALVE_OVERRIDE_ENVIRONMENT_VARIABLE_NAME_PREFIX}MAX_RAM_MEGABYTES",
         )
+        REQUIRE_RESOURCE_LIMITING: bool = pydantic.Field(
+            default=True,
+            description=f"Whether to enforce resource limiting, which requires cgroups v2 to be available; may be overridden by environment variable {_VALVE_OVERRIDE_ENVIRONMENT_VARIABLE_NAME_PREFIX}REQUIRE_RESOURCE_LIMITING.",
+        )
         AUTO_INSTALL: bool = pydantic.Field(
             default=True,
             description=f"Whether to automatically install gVisor if not installed on the system; may be overridden by environment variable {_VALVE_OVERRIDE_ENVIRONMENT_VARIABLE_NAME_PREFIX}AUTO_INSTALL. Use the 'HTTPS_PROXY' environment variable to control the proxy used for download.",
@@ -178,6 +182,7 @@ class _Tools:
             Sandbox.check_setup(
                 language=language,
                 auto_install_allowed=valves.AUTO_INSTALL,
+                require_resource_limiting=valves.REQUIRE_RESOURCE_LIMITING,
             )
 
             if valves.AUTO_INSTALL and Sandbox.runsc_needs_installation():
@@ -211,6 +216,7 @@ class _Tools:
                     networking_allowed=valves.NETWORKING_ALLOWED,
                     max_runtime_seconds=valves.MAX_RUNTIME_SECONDS,
                     max_ram_bytes=max_ram_bytes,
+                    require_resource_limiting=valves.REQUIRE_RESOURCE_LIMITING,
                     persistent_home_dir=None,
                 )
 
@@ -525,6 +531,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--debug", action="store_true", default=False, help="Enable debug mode."
     )
+    parser.add_argument(
+        "--want_status",
+        type=str,
+        default="",
+        help="If set, verify that the code evaluation status matches this or exit with error code.",
+    )
     args = parser.parse_args()
 
     if args.debug:
@@ -545,17 +557,30 @@ if __name__ == "__main__":
 
     async def _local_run():
         def _dummy_emitter(event):
-            print(f"Event: {event}", file=sys.stderr)
+            if not args.want_status:
+                print(f"Event: {event}", file=sys.stderr)
 
         tools = Tools()
         if args.language == "bash":
-            output = await tools.run_bash_command(
+            output_str = await tools.run_bash_command(
                 bash_command=code, __event_emitter__=_dummy_emitter
             )
         else:
-            output = await tools.run_python_code(
+            output_str = await tools.run_python_code(
                 python_code=code, __event_emitter__=_dummy_emitter
             )
-        print(output)
+        if args.want_status:
+            output = json.loads(output_str)
+            got_status = output["status"]
+            if got_status != args.want_status:
+                raise RuntimeError(
+                    f"Code evaluation status is {got_status} but expected {args.want_status}"
+                )
+            print(
+                f"\u2705 Code evaluation status is {got_status} as expected.",
+                file=sys.stderr,
+            )
+        else:
+            print(output_str)
 
     asyncio.run(_local_run())
