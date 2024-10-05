@@ -323,11 +323,20 @@ class _Action:
                 if output:
                     output = output.strip()
                 if debug:
+                    per_file_logs = {}
 
                     def _log(filename: str, log_line: str):
                         print(f"[{filename}] {log_line}", file=sys.stderr)
+                        if filename not in per_file_logs:
+                            per_file_logs[filename] = []
+                        per_file_logs[filename].append(log_line)
 
                     sandbox.debug_logs(_log)
+                    await emitter.status(
+                        status="complete" if status == "OK" else "error",
+                        done=True,
+                        description=f"[DEBUG MODE] status={status}; output={output}; valves=[{valves}]; debug={per_file_logs}",
+                    )
             if status == "OK":
                 generated_files_output = ""
                 if len(generated_files) > 0:

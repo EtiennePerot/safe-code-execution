@@ -364,11 +364,20 @@ class _Action:
                 if output:
                     output = output.strip()
                 if debug:
+                    per_file_logs = {}
 
                     def _log(filename: str, log_line: str):
                         print(f"[{filename}] {log_line}", file=sys.stderr)
+                        if filename not in per_file_logs:
+                            per_file_logs[filename] = []
+                        per_file_logs[filename].append(log_line)
 
                     sandbox.debug_logs(_log)
+                    await emitter.status(
+                        status="complete" if status == "OK" else "error",
+                        done=True,
+                        description=f"[DEBUG MODE] status={status}; output={output}; valves=[{valves}]; debug={per_file_logs}",
+                    )
             if status == "OK":
                 generated_files_output = ""
                 if len(generated_files) > 0:
@@ -1434,6 +1443,39 @@ class Sandbox:
                 main_status = "OK"
             my_pid = os.getpid()
             status_line = f"{main_status} (euid={self._my_euid} egid={self._my_egid} pid={my_pid} do_resource_limiting={self._do_resource_limiting} initial_cgroup_name={self._initial_cgroup_name} codeeval_cgroup_name={self._codeeval_cgroup_name} controllers={self._cgroup_controllers})"
+            want_headers = (
+                "Name",
+                "Umask",
+                "State",
+                "Uid",
+                "Gid",
+                "Groups",
+                "NStgid",
+                "NSpid",
+                "NSpgid",
+                "CapInh",
+                "CapPrm",
+                "CapEff",
+                "CapBnd",
+                "CapAmb",
+                "NoNewPrivs",
+                "Seccomp",
+                "Seccomp_filters",
+            )
+            got_headers = {}
+            try:
+                with self._open("/proc/self/status", "rb") as status_f:
+                    for line in status_f.read().decode("utf-8").splitlines():
+                        for header in want_headers:
+                            if line.startswith(f"{header}:"):
+                                got_headers[header] = line.split(":")[1].strip()
+                                break
+            except OSError as e:
+                status_line += f" (error opening /proc/self/status: {e})"
+            else:
+                for header in want_headers:
+                    got_value = got_headers.get(header)
+                    status_line += f" {header}={got_value}"
             if self._do_resource_limiting:
                 cgroupfs_data = []
                 for cgroup_components in (
@@ -1535,7 +1577,7 @@ class Sandbox:
                             fn()
                         except OSError as e:
                             do_log(f"OSError #{attempt}: {op}: {e}")
-                            errors.append(OSError(f"OSError in {op} (#{attempt}): {e}"))
+                            errors.append(OSError(f"{op} (#{attempt}): {e}"))
                         except Exception as e:
                             do_log(f"Exception #{attempt}: {op}: {e}")
                             errors.append(OSError(f"{op} failed (#{attempt}): {e}"))
