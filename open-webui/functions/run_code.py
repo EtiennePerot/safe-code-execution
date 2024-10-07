@@ -1114,7 +1114,6 @@ class Sandbox:
                 "SHLVL=1",
                 "TERM=xterm",
                 "USER=user",
-                "TZ=" + time.tzname[0],
             ],
             "cwd": "/home/user",
             "capabilities": {
@@ -2592,6 +2591,9 @@ class Sandbox:
         """
         # Set up basic configuration options.
         oci_config = copy.deepcopy(self.OCI_CONFIG_SKELETON)
+        tz = os.environ.get("TZ")
+        if tz:
+            oci_config["process"]["env"].append(f"TZ={tz}")
         if self._max_ram_bytes:
             oci_config["linux"]["resources"]["memory"]["limit"] = self._max_ram_bytes
         os.makedirs(self._bundle_path, mode=0o711)
