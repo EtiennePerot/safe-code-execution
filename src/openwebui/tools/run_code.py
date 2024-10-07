@@ -269,6 +269,11 @@ class _Tools:
                         done=True,
                         description=f"[DEBUG MODE] status={status}; output={output}; valves=[{valves}]; debug={per_file_logs}",
                     )
+
+            await emitter.message(
+                f"\n<details>\n<summary>Code Execution</summary>\nI executed the following {language} code:\n```{language}\n{code}\n```\n```Output\n{output}\n```\n</details>\n"
+            )
+
             return {
                 "status": status,
                 "output": output,
