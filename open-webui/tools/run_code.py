@@ -299,6 +299,9 @@ class _Tools:
                     )
                     status = "OK"
                     output = result.stdout or result.stderr
+                    await emitter.message(
+                        f"\n<details>\n<summary>Code Execution</summary>\nI executed the following {language} code:\n```{language}\n{code}\n```\n```Output\n{output.strip()}\n```\n</details>\n"
+                    )
                 if output:
                     output = output.strip()
                 if debug:
