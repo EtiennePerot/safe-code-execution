@@ -502,6 +502,8 @@ class _Action:
             """Render the file as inline text or markdown if small enough; otherwise return None."""
             if self._size_bytes > self.MAX_INLINE_TEXT_BYTES:
                 return None
+            if self._mime_type.startswith("image/"):
+                return f"\U0001f5bc [{self.name}]({self.url}):  \n![{self.name}]({self.url})"
             if not self._mime_type.startswith("text/"):
                 return None
             with open(self._file_path, "rb") as f:
