@@ -46,6 +46,7 @@ import sys
 import tempfile
 import typing
 import inspect
+import uuid
 import base64
 import ctypes
 import ctypes.util
@@ -194,6 +195,7 @@ class _Tools:
         valves = self.valves
         debug = valves.DEBUG
         emitter = EventEmitter(event_emitter, debug=debug)
+        execution_tracker: typing.Optional[CodeExecutionTracker] = None
 
         if valves.CHECK_FOR_UPDATES:
             if UpdateCheck.need_check():
@@ -212,6 +214,9 @@ class _Tools:
                     )
 
         async def _fail(error_message, status="SANDBOX_ERROR"):
+            if execution_tracker is not None:
+                execution_tracker.set_error(error_message)
+                await emitter.code_execution(execution_tracker)
             if debug:
                 await emitter.fail(
                     f"[DEBUG MODE] {error_message}; language={language}; code={code}; valves=[{valves}]"
@@ -225,7 +230,6 @@ class _Tools:
             if valves.MAX_RAM_MEGABYTES != 0:
                 max_ram_bytes = valves.MAX_RAM_MEGABYTES * 1024 * 1024
 
-            await emitter.status("Checking if environment supports sandboxing...")
             Sandbox.check_setup(
                 language=language,
                 auto_install_allowed=valves.AUTO_INSTALL,
@@ -236,7 +240,6 @@ class _Tools:
                 await emitter.status("Auto-installing gVisor...")
                 Sandbox.install_runsc()
 
-            await emitter.status("Initializing sandbox configuration...")
             status = "UNKNOWN"
             output = None
             language_title = language.title()
@@ -254,6 +257,12 @@ class _Tools:
             code = code.strip("`")
             code = code.strip()
 
+            execution_tracker = CodeExecutionTracker(
+                name=f"{language_title} tool execution", code=code, language=language
+            )
+            await emitter.clear_status()
+            await emitter.code_execution(execution_tracker)
+
             with tempfile.TemporaryDirectory(prefix="sandbox_") as tmp_dir:
                 sandbox = Sandbox(
                     tmp_dir=tmp_dir,
@@ -266,36 +275,28 @@ class _Tools:
                     persistent_home_dir=None,
                 )
 
-                await emitter.status(
-                    f"Running {language_title} code in gVisor sandbox..."
-                )
-
-                await emitter.citation(
-                    document=[code], metadata=[code], source={"name": "run_code"}
-                )
-
                 try:
                     result = sandbox.run()
                 except Sandbox.ExecutionTimeoutError as e:
                     await emitter.fail(
                         f"Code timed out after {valves.MAX_RUNTIME_SECONDS} seconds"
                     )
+                    execution_tracker.set_error(
+                        f"Code timed out after {valves.MAX_RUNTIME_SECONDS} seconds"
+                    )
                     status = "TIMEOUT"
                     output = e.stderr
                 except Sandbox.InterruptedExecutionError as e:
                     await emitter.fail("Code used too many resources")
+                    execution_tracker.set_error("Code used too many resources")
                     status = "INTERRUPTED"
                     output = e.stderr
                 except Sandbox.CodeExecutionError as e:
                     await emitter.fail(f"{language_title}: {e}")
+                    execution_tracker.set_error(f"{language_title}: {e}")
                     status = "ERROR"
                     output = e.stderr
                 else:
-                    await emitter.status(
-                        status="complete",
-                        done=True,
-                        description=f"{language_title} code executed successfully.",
-                    )
                     status = "OK"
                     output = result.stdout or result.stderr
                     await emitter.message(
@@ -303,6 +304,7 @@ class _Tools:
                     )
                 if output:
                     output = output.strip()
+                    execution_tracker.set_output(output)
                 if debug:
                     per_file_logs = {}
 
@@ -318,6 +320,7 @@ class _Tools:
                         done=True,
                         description=f"[DEBUG MODE] status={status}; output={output}; valves=[{valves}]; debug={per_file_logs}",
                     )
+            await emitter.code_execution(execution_tracker)
             return {
                 "status": status,
                 "output": output,
@@ -375,6 +378,9 @@ class Tools:
         )
 
 
+# fmt: off
+
+
 class EventEmitter:
     """
     Helper wrapper for OpenWebUI event emissions.
@@ -388,27 +394,32 @@ class EventEmitter:
         self.event_emitter = event_emitter
         self._debug = debug
         self._status_prefix = None
+        self._emitted_status = False
 
     def set_status_prefix(self, status_prefix):
         self._status_prefix = status_prefix
 
-    async def _emit(self, typ, data):
+    async def _emit(self, typ, data, twice):
         if self._debug:
             print(f"Emitting {typ} event: {data}", file=sys.stderr)
         if not self.event_emitter:
             return None
-        maybe_future = self.event_emitter(
-            {
-                "type": typ,
-                "data": data,
-            }
-        )
-        if asyncio.isfuture(maybe_future) or inspect.isawaitable(maybe_future):
-            return await maybe_future
+        result = None
+        for i in range(2 if twice else 1):
+            maybe_future = self.event_emitter(
+                {
+                    "type": typ,
+                    "data": data,
+                }
+            )
+            if asyncio.isfuture(maybe_future) or inspect.isawaitable(maybe_future):
+                result = await maybe_future
+        return result
 
     async def status(
         self, description="Unknown state", status="in_progress", done=False
     ):
+        self._emitted_status = True
         if self._status_prefix is not None:
             description = f"{self._status_prefix}{description}"
         await self._emit(
@@ -418,22 +429,25 @@ class EventEmitter:
                 "description": description,
                 "done": done,
             },
+            twice=not done and len(description) <= 1024,
         )
-        if not done and len(description) <= 1024:
-            # Emit it again; Open WebUI does not seem to flush this reliably.
-            # Only do it for relatively small statuses; when debug mode is enabled,
-            # this can take up a lot of space.
-            await self._emit(
-                "status",
-                {
-                    "status": status,
-                    "description": description,
-                    "done": done,
-                },
-            )
 
     async def fail(self, description="Unknown error"):
         await self.status(description=description, status="error", done=True)
+
+    async def clear_status(self):
+        if not self._emitted_status:
+            return
+        self._emitted_status = False
+        await self._emit(
+            "status",
+            {
+                "status": "complete",
+                "description": "",
+                "done": True,
+            },
+            twice=True,
+        )
 
     async def message(self, content):
         await self._emit(
@@ -441,6 +455,7 @@ class EventEmitter:
             {
                 "content": content,
             },
+            twice=False,
         )
 
     async def citation(self, document, metadata, source):
@@ -451,15 +466,50 @@ class EventEmitter:
                 "metadata": metadata,
                 "source": source,
             },
+            twice=False,
         )
 
-    async def code_execution_result(self, output):
+    async def code_execution(self, code_execution_tracker):
         await self._emit(
-            "code_execution_result",
-            {
-                "output": output,
-            },
+            "citation", code_execution_tracker._citation_data(), twice=True
         )
+
+
+class CodeExecutionTracker:
+    def __init__(self, name, code, language):
+        self._uuid = str(uuid.uuid4())
+        self.name = name
+        self.code = code
+        self.language = language
+        self._result = {}
+
+    def set_error(self, error):
+        self._result["error"] = error
+
+    def set_output(self, output):
+        self._result["output"] = output
+
+    def add_file(self, name, url):
+        if "files" not in self._result:
+            self._result["files"] = []
+        self._result["files"].append(
+            {
+                "name": name,
+                "url": url,
+            }
+        )
+
+    def _citation_data(self):
+        data = {
+            "type": "code_execution",
+            "uuid": self._uuid,
+            "name": self.name,
+            "code": self.code,
+            "language": self.language,
+        }
+        if "output" in self._result or "error" in self._result:
+            data["result"] = self._result
+        return data
 
 
 class Sandbox:
@@ -2695,6 +2745,7 @@ class UpdateCheck:
 
 
 UpdateCheck.init_from_frontmatter(os.path.abspath(__file__))
+# fmt: on
 
 
 _SAMPLE_BASH_INSTRUCTIONS = (
