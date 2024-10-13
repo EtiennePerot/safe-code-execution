@@ -267,6 +267,27 @@ RUN wget -O /tmp/runsc "https://storage.googleapis.com/gvisor/releases/release/l
 
 </details>
 
+### **Optional**: Add packages to Open WebUI `Dockerfile`
+
+<details>
+<summary>To allow code execution sandboxes to use tools or Python packages that aren't part of the Open WebUI container image, you can preinstall them in the `Dockerfile`.</summary>
+<br/>
+
+For example, here is a sample `Dockerfile` that extends the Open WebUI container image and installs the `sudo` and `ping` tools along with some Python packages:
+
+```Dockerfile
+FROM ghcr.io/open-webui/open-webui:main
+
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get upgrade -y </dev/null && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      iputils-ping sudo \
+    </dev/null && \
+    pip install matplotlib yfinance numpy
+```
+
+</details>
+
 ### **Optional**: Lockdown for production setups
 
 <details>

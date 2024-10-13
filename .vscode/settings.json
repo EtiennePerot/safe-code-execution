@@ -26,9 +26,11 @@
 		"getpid",
 		"gotmp",
 		"gvisor",
+		"iputils",
 		"libc",
 		"libcap",
 		"Lockdown",
+		"matplotlib",
 		"maxsplit",
 		"memfd",
 		"mknod",
@@ -40,6 +42,7 @@
 		"NOFILE",
 		"noninteractive",
 		"nsswitch",
+		"numpy",
 		"openwebui",
 		"pacct",
 		"perfmon",
@@ -87,6 +90,7 @@
 		"urandom",
 		"userspace",
 		"webui",
+		"yfinance",
 		"zswap"
 	],
 	"[python]": {
