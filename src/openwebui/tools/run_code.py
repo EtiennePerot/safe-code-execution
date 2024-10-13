@@ -147,6 +147,7 @@ class _Tools:
         valves = self.valves
         debug = valves.DEBUG
         emitter = EventEmitter(event_emitter, debug=debug)
+        execution_tracker: typing.Optional[CodeExecutionTracker] = None
 
         if valves.CHECK_FOR_UPDATES:
             if UpdateCheck.need_check():
@@ -165,6 +166,9 @@ class _Tools:
                     )
 
         async def _fail(error_message, status="SANDBOX_ERROR"):
+            if execution_tracker is not None:
+                execution_tracker.set_error(error_message)
+                await emitter.code_execution(execution_tracker)
             if debug:
                 await emitter.fail(
                     f"[DEBUG MODE] {error_message}; language={language}; code={code}; valves=[{valves}]"
@@ -178,7 +182,6 @@ class _Tools:
             if valves.MAX_RAM_MEGABYTES != 0:
                 max_ram_bytes = valves.MAX_RAM_MEGABYTES * 1024 * 1024
 
-            await emitter.status("Checking if environment supports sandboxing...")
             Sandbox.check_setup(
                 language=language,
                 auto_install_allowed=valves.AUTO_INSTALL,
@@ -189,7 +192,6 @@ class _Tools:
                 await emitter.status("Auto-installing gVisor...")
                 Sandbox.install_runsc()
 
-            await emitter.status("Initializing sandbox configuration...")
             status = "UNKNOWN"
             output = None
             language_title = language.title()
@@ -207,6 +209,12 @@ class _Tools:
             code = code.strip("`")
             code = code.strip()
 
+            execution_tracker = CodeExecutionTracker(
+                name=f"{language_title} tool execution", code=code, language=language
+            )
+            await emitter.clear_status()
+            await emitter.code_execution(execution_tracker)
+
             with tempfile.TemporaryDirectory(prefix="sandbox_") as tmp_dir:
                 sandbox = Sandbox(
                     tmp_dir=tmp_dir,
@@ -219,36 +227,28 @@ class _Tools:
                     persistent_home_dir=None,
                 )
 
-                await emitter.status(
-                    f"Running {language_title} code in gVisor sandbox..."
-                )
-
-                await emitter.citation(
-                    document=[code], metadata=[code], source={"name": "run_code"}
-                )
-
                 try:
                     result = sandbox.run()
                 except Sandbox.ExecutionTimeoutError as e:
                     await emitter.fail(
                         f"Code timed out after {valves.MAX_RUNTIME_SECONDS} seconds"
                     )
+                    execution_tracker.set_error(
+                        f"Code timed out after {valves.MAX_RUNTIME_SECONDS} seconds"
+                    )
                     status = "TIMEOUT"
                     output = e.stderr
                 except Sandbox.InterruptedExecutionError as e:
                     await emitter.fail("Code used too many resources")
+                    execution_tracker.set_error("Code used too many resources")
                     status = "INTERRUPTED"
                     output = e.stderr
                 except Sandbox.CodeExecutionError as e:
                     await emitter.fail(f"{language_title}: {e}")
+                    execution_tracker.set_error(f"{language_title}: {e}")
                     status = "ERROR"
                     output = e.stderr
                 else:
-                    await emitter.status(
-                        status="complete",
-                        done=True,
-                        description=f"{language_title} code executed successfully.",
-                    )
                     status = "OK"
                     output = result.stdout or result.stderr
                     await emitter.message(
@@ -256,6 +256,7 @@ class _Tools:
                     )
                 if output:
                     output = output.strip()
+                    execution_tracker.set_output(output)
                 if debug:
                     per_file_logs = {}
 
@@ -271,6 +272,7 @@ class _Tools:
                         done=True,
                         description=f"[DEBUG MODE] status={status}; output={output}; valves=[{valves}]; debug={per_file_logs}",
                     )
+            await emitter.code_execution(execution_tracker)
             return {
                 "status": status,
                 "output": output,
@@ -330,15 +332,14 @@ class Tools:
 
 # :: Note: All lines with '# ::' in them in this file will be removed in the
 # :: released version of this tool.
-sys.path.append(  # ::
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # ::
-)  # ::
-from openwebui.event_emitter import EventEmitter  # INLINE_IMPORT # noqa: E402
+# fmt: off
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))  # ::
+from openwebui.event_emitter import EventEmitter, CodeExecutionTracker  # INLINE_IMPORT # noqa: E402
 from safecode.sandbox import Sandbox  # INLINE_IMPORT # noqa: E402
 from safecode.update_check import UpdateCheck  # INLINE_IMPORT # noqa: E402
-
 UpdateCheck.disable()  # ::
 UpdateCheck.init_from_frontmatter(os.path.abspath(__file__))
+# fmt: on
 
 
 _SAMPLE_BASH_INSTRUCTIONS = (
