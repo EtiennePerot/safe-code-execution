@@ -264,8 +264,7 @@ class _Action:
 
                 sandbox = Sandbox(
                     tmp_dir=tmp_dir,
-                    language=language,
-                    code=code,
+                    snippets=((language, code),),
                     debug=debug,
                     networking_allowed=valves.NETWORKING_ALLOWED,
                     max_runtime_seconds=valves.MAX_RUNTIME_SECONDS,
