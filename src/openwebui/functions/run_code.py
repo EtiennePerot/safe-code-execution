@@ -377,13 +377,30 @@ class _Action:
                     await emitter.message(
                         f"\n\n---\nI executed this {language_title} code and it timed out after {self.valves.MAX_RUNTIME_SECONDS} seconds.\n{update_check_notice}"
                     )
-            if status == "ERROR" and output:
+            elif status == "INTERRUPTED":
+                if output:
+                    await emitter.message(
+                        f"\n\n---\nI executed this {language_title} code and used too many resources.\n```Error\n{output}\n```\n{update_check_notice}"
+                    )
+                else:
+                    await emitter.message(
+                        f"\n\n---\nI executed this {language_title} code and used too many resources.\n{update_check_notice}"
+                    )
+            elif status == "STORAGE_ERROR":
+                await emitter.message(
+                    f"\n\n---\nI executed this {language_title} code but it exceeded the storage quota.\n```Error\n{output}\n```\n{update_check_notice}"
+                )
+            elif status == "ERROR" and output:
                 await emitter.message(
                     f"\n\n---\nI executed this {language_title} code and got the following error:\n```Error\n{output}\n```\n{update_check_notice}"
                 )
-            else:
+            elif status == "ERROR":
                 await emitter.message(
                     f"\n\n---\nI executed this {language_title} code but got an unexplained error.\n{update_check_notice}"
+                )
+            else:
+                raise Sandbox.SandboxRuntimeException(
+                    f"Unexplained status: {status} (output: {output})"
                 )
             return json.dumps({"status": status, "output": output})
         except Sandbox.PlatformNotSupportedException as e:
