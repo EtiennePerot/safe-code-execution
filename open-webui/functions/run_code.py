@@ -61,6 +61,8 @@ import copy
 import platform
 import re
 import signal
+import socket
+import struct
 import threading
 import datetime
 import urllib.error
@@ -1210,7 +1212,28 @@ class Sandbox:
 
     # Re-execution stages.
     _STAGE_SANDBOX = "SANDBOX"
-    _STAGE_SNIPPET = "SNIPPET"
+    _STAGE_SERVER = "SERVER"
+
+    # Timeout slack in max runtime enforcement, from deepest to shallowest.
+    _TIMEOUT_SLACK_FINAL = 0.25  # Actual code execution
+    _TIMEOUT_SLACK_CONNECT = (
+        _TIMEOUT_SLACK_FINAL + 0.5
+    )  # Connect to code evaluation server
+    _TIMEOUT_SLACK_CONNECT_FIRST_REQUEST = (
+        _TIMEOUT_SLACK_FINAL + 5
+    )  # Connect to code evaluation server for first request
+    _TIMEOUT_SLACK_CODE_EVAL_REQUEST = (
+        _TIMEOUT_SLACK_CONNECT + 2.0
+    )  # Send and receive code evaluation request data
+    _TIMEOUT_SLACK_COPY_OUT = (
+        _TIMEOUT_SLACK_FINAL + 5
+    )  # Copy files from persistent directory
+    _TIMEOUT_SLACK_TERMINATE = (
+        _TIMEOUT_SLACK_FINAL + 0.5
+    )  # Terminate code evaluation server
+    _TIMEOUT_SLACK_WAIT_FOR_SANDBOX_SHUTDOWN = (
+        _TIMEOUT_SLACK_FINAL + 1
+    )  # Wait for sandbox process to exit.
 
     # libc bindings.
     # Populated using `_libc`.
@@ -2154,6 +2177,315 @@ class Sandbox:
 
             return _cancel
 
+    class _InSandboxServer:
+        """
+        Server that runs inside the gVisor sandbox.
+        """
+
+        def __init__(self):
+            pass
+
+        def run(self):
+            """
+            Run a server loop inside the server listening on UDS.
+            This code is called from *within* the gVisor sandbox.
+            """
+            keep_going = True
+            server_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server_socket.bind("/sandbox/socket")
+            server_socket.listen(1)
+            server_socket_closed = False
+            try:
+                with open("/sandbox/started", "wb") as started_f:
+                    started_f.write(b"OK\n")
+                while keep_going:
+                    client_socket, _ = server_socket.accept()
+                    try:
+                        request_size_buf = client_socket.recv(8)
+                        if len(request_size_buf) != 8:
+                            raise Sandbox.SandboxRuntimeException(
+                                f"Server did not receive 8 bytes for request size: {repr(request_size_buf)}"
+                            )
+                        request_length = struct.unpack(">Q", request_size_buf)[0]
+                        request_bytes = []
+                        remaining_bytes = request_length
+                        while remaining_bytes > 0:
+                            packet_size = min(remaining_bytes, 0x100000)
+                            request_data = client_socket.recv(packet_size)
+                            if len(request_data) == 0:
+                                break
+                            remaining_bytes -= len(request_data)
+                            request_bytes.append(request_data)
+                        if remaining_bytes > 0:
+                            raise Sandbox.SandboxRuntimeException(
+                                f"Got partial request; {remaining_bytes}/{request_length} bytes still expected"
+                            )
+                        request_data = json.loads(
+                            (b"".join(request_bytes)).decode("utf-8")
+                        )
+                        if "type" not in request_data or "kwargs" not in request_data:
+                            raise Sandbox.SandboxRuntimeException(
+                                f"Invalid request to in-sandbox server: {request_data}"
+                            )
+                        request_type = request_data["type"]
+                        request_kwargs = request_data.get("kwargs", {})
+                        response = None
+                        if request_type == "code_eval":
+                            response = self._handle_code_eval(**request_kwargs)
+                        elif request_type == "copy_out":
+                            response = self._handle_copy_out(**request_kwargs)
+                        elif request_type == "terminate":
+                            keep_going = False
+                            server_socket.close()
+                            server_socket_closed = True
+                            response = {}
+                        else:
+                            raise Sandbox.SandboxRuntimeException(
+                                f"Invalid request type: {request_type}"
+                            )
+                    except Exception as e:
+                        response = {"exception": Sandbox._json_exception_encode(e)}
+                    assert response is not None, "Logic error"
+                    try:
+                        response_bytes = json.dumps(response).encode("utf-8")
+                        client_socket.sendall(struct.pack(">Q", len(response_bytes)))
+                        client_socket.sendall(response_bytes)
+                    finally:
+                        client_socket.close()
+            finally:
+                if not server_socket_closed:
+                    server_socket.close()
+
+        def _handle_code_eval(self, language, code, max_runtime_seconds):
+            """
+            Handle a single code evaluation request.
+            """
+            if language not in Sandbox.SUPPORTED_LANGUAGES:
+                raise Sandbox.SandboxRuntimeException(
+                    f"Unsupported language: {language}"
+                )
+            interpreter_path = None
+            if language == Sandbox.LANGUAGE_BASH:
+                interpreter_path = shutil.which("bash")
+            elif language == Sandbox.LANGUAGE_PYTHON:
+                interpreter_path = sys.executable
+            if interpreter_path is None:
+                raise Sandbox.SandboxRuntimeException(
+                    f"Cannot find interpreter for language: {language}"
+                )
+            cmd = [interpreter_path, "/dev/stdin"]
+            if max_runtime_seconds <= 0.0:
+                raise Sandbox.SandboxRuntimeException(
+                    "Exceeded the code execution deadline"
+                )
+            try:
+                result = subprocess.run(
+                    cmd,
+                    input=code + "\n",
+                    text=True,
+                    capture_output=True,
+                    timeout=max_runtime_seconds + Sandbox._TIMEOUT_SLACK_FINAL,
+                    check=True,
+                )
+            except subprocess.TimeoutExpired as e:
+                raise Sandbox.ExecutionTimeoutError(
+                    code=code,
+                    returncode=126,
+                    cmd=cmd,
+                    output=e.stdout or "",
+                    stderr=e.stderr or "",
+                )
+            except subprocess.CalledProcessError as e:
+                raise Sandbox.CodeExecutionError(
+                    code=code,
+                    returncode=e.returncode,
+                    cmd=cmd,
+                    output=e.stdout or "",
+                    stderr=e.stderr or "",
+                )
+            else:
+                return {
+                    "args": cmd,
+                    "returncode": 0,
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                }
+
+        def _handle_copy_out(self):
+            if os.path.isdir("/sandbox/persistent"):
+                shutil.copytree(
+                    "/home/user",
+                    "/sandbox/persistent",
+                    ignore_dangling_symlinks=True,
+                    dirs_exist_ok=True,
+                )
+            return {}
+
+    class _SandboxClient:
+        """
+        Client counterpart to `_InSandboxServer`.
+        This runs outside of the gVisor sandbox.
+        """
+
+        class _RequestTimeoutError(Exception):
+            """Raised when _request takes too long."""
+
+        class _ServerDiedError(Exception):
+            """Raised when the server dies mid-request."""
+
+        def __init__(self, sandbox_shared_path, runsc_popen):
+            """
+            Constructor.
+
+            :param sandbox_shared_path: Path to the dir mounted as /sandbox in the sandbox.
+            :param runsc_popen: subprocess.Popen object to runsc, to check for liveness.
+            """
+            self._sandbox_shared_path = sandbox_shared_path
+            self._runsc_popen = runsc_popen
+            self._first_request = True
+
+        def _check_server_alive(self):
+            """Check if the server is alive.
+
+            :return: True if the server is still alive.
+            :raises _ServerDiedError: If the server is not alive.
+            """
+            try:
+                self._runsc_popen.wait(timeout=Sandbox._TIMEOUT_SLACK_CONNECT)
+            except subprocess.TimeoutExpired:
+                return True
+            else:
+                raise self._ServerDiedError()
+
+        def _request(self, request_type, deadline, **request_kwargs):
+            """Connect and get a socket to the server."""
+            if self._first_request:
+                connect_deadline = min(
+                    deadline, time.time() + Sandbox._TIMEOUT_SLACK_CONNECT_FIRST_REQUEST
+                )
+                self._first_request = False
+            else:
+                connect_deadline = min(
+                    deadline, time.time() + Sandbox._TIMEOUT_SLACK_CONNECT
+                )
+            started_marker_path = os.path.join(self._sandbox_shared_path, "started")
+            while time.time() < connect_deadline and not os.path.exists(
+                started_marker_path
+            ):
+                time.sleep(0.05)
+            if time.time() >= connect_deadline and not os.path.exists(
+                started_marker_path
+            ):
+                raise Sandbox.SandboxRuntimeException(
+                    f"Sandbox did not start in time: {started_marker_path} still does not exist"
+                )
+            client_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            socket_path = os.path.join(self._sandbox_shared_path, "socket")
+            try:
+                client_socket.connect(socket_path)
+            except Exception as e:
+                raise Sandbox.SandboxRuntimeException(
+                    f"Cannot connect to socket at {socket_path}: {e}"
+                )
+            try:
+                client_socket.settimeout(0.5)
+                request_bytes = json.dumps(
+                    {
+                        "type": request_type,
+                        "kwargs": request_kwargs,
+                    }
+                ).encode("utf-8")
+                client_socket.sendall(struct.pack(">Q", len(request_bytes)))
+                client_socket.sendall(request_bytes)
+                response_size = None
+                remaining_bytes = -1
+                response_bytes = []
+                while (
+                    response_size is None or remaining_bytes > 0
+                ) and time.time() < deadline:
+                    try:
+                        if response_size is None:
+                            response_size_buf = client_socket.recv(8)
+                            if len(response_size_buf) != 8:
+                                self._check_server_alive()
+                                raise Sandbox.SandboxRuntimeException(
+                                    f"Client did not get 8 bytes for response size: {repr(response_size_buf)}"
+                                )
+                            response_size = struct.unpack(">Q", response_size_buf)[0]
+                            remaining_bytes = response_size
+                        if remaining_bytes > 0:
+                            packet_data = client_socket.recv(
+                                min(remaining_bytes, 0x100000)
+                            )
+                            if len(packet_data) == 0:
+                                self._check_server_alive()
+                                break
+                            remaining_bytes -= len(packet_data)
+                            response_bytes.append(packet_data)
+                    except socket.timeout:
+                        continue
+                if time.time() >= deadline:
+                    self._check_server_alive()
+                    raise self._RequestTimeoutError()
+                try:
+                    response = json.loads((b"".join(response_bytes)).decode("utf-8"))
+                except json.decoder.JSONDecodeError as e:
+                    raise Sandbox.SandboxRuntimeException(
+                        f"Invalid response JSON: {e} ({repr(response_bytes)})"
+                    )
+                if "exception" in response:
+                    raise Sandbox._json_exception_decode(response["exception"])
+                return response
+            finally:
+                client_socket.close()
+
+        def code_eval(
+            self, language, code, max_runtime_seconds
+        ) -> subprocess.CompletedProcess:
+            """Run a single snippet of code."""
+            request_deadline = (
+                time.time()
+                + max_runtime_seconds
+                + Sandbox._TIMEOUT_SLACK_CODE_EVAL_REQUEST
+            )
+            try:
+                response = self._request(
+                    "code_eval",
+                    request_deadline,
+                    language=language,
+                    code=code,
+                    max_runtime_seconds=max_runtime_seconds,
+                )
+            except self._RequestTimeoutError:
+                raise Sandbox.ExecutionTimeoutError(
+                    code=code,
+                    returncode=126,
+                    cmd=[language],
+                    output=None,
+                    stderr=None,
+                )
+            except self._ServerDiedError:
+                raise Sandbox.InterruptedExecutionError(
+                    code=code,
+                    returncode=127,
+                    cmd=[language],
+                    output=None,
+                    stderr=None,
+                )
+            else:
+                return subprocess.CompletedProcess(
+                    args=response["args"],
+                    returncode=response["returncode"],
+                    stdout=response.get("stdout"),
+                    stderr=response.get("stderr"),
+                )
+
+        def copy_out(self):
+            self._request("copy_out", time.time() + Sandbox._TIMEOUT_SLACK_COPY_OUT)
+
+        def terminate(self):
+            self._request("terminate", time.time() + Sandbox._TIMEOUT_SLACK_TERMINATE)
+
     class SandboxException(Exception):
         """
         Base class for all exceptions generated by `Sandbox`.
@@ -2255,6 +2587,157 @@ class Sandbox:
         Raised when the environment does not give adequate control over the
         system to run gVisor properly.
         """
+
+    @classmethod
+    def _json_exception_encode(cls, e):
+        exception_info = {
+            "name": e.__class__.__name__,
+            "str": str(e),
+        }
+        if isinstance(e, cls.SandboxException) or isinstance(e, cls.ExecutionError):
+            exception_info["args"] = e._sandbox_exception_args
+            exception_info["kwargs"] = e._sandbox_exception_kwargs
+        return exception_info
+
+    @classmethod
+    def _json_exception_decode(cls, exception_data):
+        """Returns a JSON-encoded exception."""
+        class_name = exception_data["name"]
+        found_class = None
+        for ex_class in (
+            cls.PlatformNotSupportedException,
+            cls.SandboxRuntimeException,
+            cls.CodeExecutionError,
+            cls.ExecutionTimeoutError,
+            cls.InterruptedExecutionError,
+            cls.GVisorNotInstalledException,
+            cls.CorruptDownloadException,
+            cls.EnvironmentNeedsSetupException,
+            cls.ExecutionError,
+            cls.SandboxException,
+        ):
+            if ex_class.__name__ == class_name:
+                found_class = ex_class
+                break
+        if found_class is None:
+            exception_str = exception_data["str"]
+            return cls.SandboxRuntimeException(f"{class_name}: {exception_str}")
+        return found_class(*exception_data["args"], **exception_data["kwargs"])
+
+    @classmethod
+    def _json_completed_process_decode(cls, result) -> subprocess.CompletedProcess:
+        """Decode a JSON-encoded subprocess.CompletedProcess."""
+        stdout = None
+        if result["stdout"] is not None:
+            stdout = base64.b64decode(result["stdout"])
+            if result["stdout_is_text"]:
+                stdout = stdout.decode("utf-8", errors="replace")
+        stderr = None
+        if result["stderr"] is not None:
+            stderr = base64.b64decode(result["stderr"])
+            if result["stderr_is_text"]:
+                stderr = stderr.decode("utf-8", errors="replace")
+        return subprocess.CompletedProcess(
+            args=result["args"],
+            returncode=result["returncode"],
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    @classmethod
+    def _json_completed_process_encode(cls, result: subprocess.CompletedProcess):
+        """Return a JSON-encoded subprocess.CompletedProcess."""
+        stdout = result.stdout
+        stdout_is_text = False
+        if stdout is not None and type(stdout) is not type(b""):
+            stdout = stdout.encode("utf-8", errors="replace")
+            stdout_is_text = True
+        stderr = result.stderr
+        stderr_is_text = False
+        if stderr is not None and type(stderr) is not type(b""):
+            stderr = stderr.encode("utf-8", errors="replace")
+            stderr_is_text = True
+        return {
+            "args": result.args,
+            "returncode": result.returncode,
+            "stdout": base64.b64encode(stdout).decode("utf-8")
+            if stdout is not None
+            else None,
+            "stdout_is_text": stdout_is_text,
+            "stderr": base64.b64encode(stderr).decode("utf-8")
+            if stderr is not None
+            else None,
+            "stderr_is_text": stderr_is_text,
+        }
+
+    @classmethod
+    def _concatenate_outputs(cls, streams, encoding="utf-8"):
+        """
+        Concatenate a list of byte or unicode strings to a single string.
+        Useful for merging stdout/stderr from multiple invocations.
+        """
+        is_all_text = True
+        all_text = []
+        for stream in streams:
+            if stream is None:
+                continue
+            if type(stream) is type(""):
+                all_text.append(stream)
+            elif type(stream) is type(b""):
+                try:
+                    text_stream = stream.decode(encoding, errors="strict")
+                except UnicodeDecodeError:
+                    is_all_text = False
+                    break
+                else:
+                    all_text.append(text_stream)
+            else:
+                raise cls.SandboxRuntimeException(
+                    f"Non-string passed to _concatenate_outputs: {type(stream)}"
+                )
+        if is_all_text:
+            return "".join(all_text)
+        all_bytes = []
+        for stream in streams:
+            if stream is None:
+                continue
+            if type(stream) is type(b""):
+                all_bytes.append(stream)
+            elif type(stream) is type(""):
+                all_bytes.append(stream.encode(encoding, errors="strict"))
+            else:
+                assert False, "Logic error"
+        return b"".join(all_bytes)
+
+    @classmethod
+    def _process_json_wrapped_result(
+        cls, result: subprocess.CompletedProcess
+    ) -> subprocess.CompletedProcess:
+        """
+        Process a `CompletedProcess` from a wrapped invocation.
+
+        :param result: A `CompletedProcess` with stdout captured.
+        :return: A synthetic `CompletedProcess` from the JSON information in stdout.
+        :raises Sandbox.SandboxRuntimeException: If the JSON information cannot be interpreted.
+        :raises Sandbox.SandboxException: For any exception that is forwarded.
+        """
+        if not result.stdout:
+            raise cls.SandboxRuntimeException(
+                f"Subprocess interpreter did not produce any output (stderr: {result.stderr})"
+            )
+        try:
+            output = json.loads(result.stdout)
+        except json.decoder.JSONDecodeError as e:
+            raise cls.SandboxRuntimeException(
+                f"Invalid process JSON data (stdout: {result.stdout}): {e}"
+            )
+        if "exception" in output:
+            raise cls._json_exception_decode(output["exception"])
+        if "result" not in output:
+            raise cls.SandboxRuntimeException(
+                f"Invalid response from subprocess: {output}"
+            )
+        return cls._json_completed_process_decode(output["result"])
 
     @classmethod
     def check_platform(cls):
@@ -2505,49 +2988,26 @@ class Sandbox:
         cls._SelfFile.init()
         if cls._MARKER_ENVIRONMENT_VARIABLE not in os.environ:
             return
+        result = None
+        output_stream = sys.stderr
         try:
             directives = json.load(sys.stdin)
             sandbox = cls(**directives["settings"])
             if directives["stage"] == cls._STAGE_SANDBOX:
-                result = sandbox._run()
-            elif directives["stage"] == cls._STAGE_SNIPPET:
-                result = sandbox._run_snippets()
+                output_stream = sys.stdout
+                result = cls._json_completed_process_encode(sandbox._run())
+            elif directives["stage"] == cls._STAGE_SERVER:
+                cls._InSandboxServer().run()
+                result = {}
             else:
                 raise ValueError(f"Invalid stage in directives: {directives}")
         except Exception as e:
-            exception_info = {
-                "name": e.__class__.__name__,
-                "str": str(e),
-            }
-            if isinstance(e, cls.SandboxException) or isinstance(e, cls.ExecutionError):
-                exception_info["args"] = e._sandbox_exception_args
-                exception_info["kwargs"] = e._sandbox_exception_kwargs
-            json.dump(
-                {
-                    "exception": exception_info,
-                },
-                sys.stdout,
-            )
+            json.dump({"exception": cls._json_exception_encode(e)}, output_stream)
         else:
-            stdout = result.stdout
-            if type(stdout) is not type(b""):
-                stdout = stdout.encode("utf-8", errors="replace")
-            stderr = result.stderr
-            if type(stderr) is not type(b""):
-                stderr = stderr.encode("utf-8", errors="replace")
-            json.dump(
-                {
-                    "result": {
-                        "args": result.args,
-                        "returncode": result.returncode,
-                        "stdout": base64.b64encode(stdout).decode("utf-8"),
-                        "stderr": base64.b64encode(stderr).decode("utf-8"),
-                    },
-                },
-                sys.stdout,
-            )
+            assert result is not None, "Logic error"
+            json.dump({"result": result}, output_stream)
         finally:
-            sys.stdout.flush()
+            output_stream.flush()
             sys.exit(0)
 
     def __init__(
@@ -2784,66 +3244,6 @@ class Sandbox:
         with open(os.path.join(self._bundle_path, "config.json"), "w") as bundle_f:
             json.dump(oci_config, bundle_f, indent=2, sort_keys=True)
 
-    def _process_json_wrapped_result(
-        self, result: subprocess.CompletedProcess
-    ) -> subprocess.CompletedProcess:
-        """
-        Process a `CompletedProcess` from a wrapped invocation.
-
-        :param result: A `CompletedProcess` with stdout captured.
-        :return: A synthetic `CompletedProcess` from the JSON information in stdout.
-        :raises Sandbox.SandboxRuntimeException: If the JSON information cannot be interpreted.
-        :raises Sandbox.SandboxException: For any exception that is forwarded.
-        """
-        if not result.stdout:
-            raise self.SandboxRuntimeException(
-                f"Subprocess interpreter did not produce any output (stderr: {result.stderr})"
-            )
-        try:
-            output = json.loads(result.stdout)
-        except json.decoder.JSONDecodeError as e:
-            raise self.SandboxRuntimeException(
-                f"Subprocess interpreter produced invalid JSON (stdout: {result.stdout}): {e}"
-            )
-        if "exception" in output:
-            class_name = output["exception"]["name"]
-            found_class = None
-            for ex_class in (
-                self.PlatformNotSupportedException,
-                self.SandboxRuntimeException,
-                self.CodeExecutionError,
-                self.ExecutionTimeoutError,
-                self.InterruptedExecutionError,
-                self.GVisorNotInstalledException,
-                self.CorruptDownloadException,
-                self.EnvironmentNeedsSetupException,
-                self.ExecutionError,
-                self.SandboxException,
-            ):
-                if ex_class.__name__ == class_name:
-                    found_class = ex_class
-                    break
-            if found_class is None:
-                exception_str = output["exception"]["str"]
-                raise self.SandboxRuntimeException(f"{class_name}: {exception_str}")
-            raise found_class(
-                *output["exception"]["args"], **output["exception"]["kwargs"]
-            )
-        if "result" not in output:
-            raise self.SandboxRuntimeException(
-                f"Invalid response from subprocess: {output}"
-            )
-        return subprocess.CompletedProcess(
-            args=output["result"]["args"],
-            returncode=output["result"]["returncode"],
-            stdout=base64.b64decode(output["result"]["stdout"]).decode(
-                "utf-8", errors="replace"
-            ),
-            stderr=base64.b64decode(output["result"]["stderr"]).decode(
-                "utf-8", errors="replace"
-            ),
-        )
-
     def _run(self) -> subprocess.CompletedProcess:
         """
         Spawn and wait for the sandbox. Runs in separate forked process.
@@ -2854,15 +3254,19 @@ class Sandbox:
         :raises Sandbox.InterruptedExecutionError: If the code interpreter died without providing a return code; usually due to running over resource limits.
         :raises sandbox.CodeExecutionError: If the code interpreter failed to execute the given code. This does not represent a sandbox failure.
         """
+        runsc = None
+        resource_monitor_cancel = None
+        runsc_memfd_stdout = None
+        runsc_memfd_stderr = None
         try:
             self._setup_sandbox()
-
             network_mode = "host" if self._networking_allowed else "none"
             runsc_argv = [
                 self.get_runsc_path(),
                 "--rootless=true",
                 "--directfs=false",
                 f"--network={network_mode}",
+                "--host-uds=all",
                 "--ignore-cgroups=true",  # We already took care of cgroups manually.
                 f"--root={self._runtime_root_path}",
                 f"--debug-log={self._logs_path}/",
@@ -2874,45 +3278,83 @@ class Sandbox:
             runsc_env["TMPDIR"] = self._gotmp_dir
             runsc_input = json.dumps(
                 {
-                    "stage": self._STAGE_SNIPPET,
+                    "stage": self._STAGE_SERVER,
                     "settings": self._settings,
                 }
             )
             started_marker_path = os.path.join(self._sandbox_shared_path, "started")
             resource_monitor_cancel = self._switcheroo.monitor_cgroup_resources()
+            memfd_uuid = str(uuid.uuid4())
+            runsc_memfd_stdout = os.fdopen(
+                os.memfd_create(f"runsc-stdout.{memfd_uuid}"), "wb+"
+            )
+            runsc_memfd_stderr = os.fdopen(
+                os.memfd_create(f"runsc-stderr.{memfd_uuid}"), "wb+"
+            )
             try:
-                result = subprocess.run(
+                runsc = subprocess.Popen(
                     runsc_argv,
                     env=runsc_env,
                     preexec_fn=self._switcheroo.move_process_to_sandbox_leaf_cgroup_lambda(),
-                    input=runsc_input,
+                    stdin=subprocess.PIPE,
+                    stdout=runsc_memfd_stdout,
+                    stderr=runsc_memfd_stderr,
                     text=True,
-                    capture_output=True,
-                    timeout=self._max_runtime_seconds + 3,
-                    check=True,
                 )
-            except subprocess.TimeoutExpired as e:
-                raise self.ExecutionTimeoutError(
-                    code="; ".join(
-                        f"({language}, {repr(code)}))"
-                        for language, code in self._snippets
-                    ),
-                    returncode=126,
-                    cmd=self._sandboxed_command,
-                    output=e.stdout,
-                    stderr=e.stderr,
+                runsc.stdin.write(runsc_input)
+                runsc.stdin.close()
+            except OSError as e:
+                raise self.SandboxRuntimeException(f"Spawn runsc: OSError: {e}")
+            except Exception as e:
+                raise self.SandboxRuntimeException(f"Spawn runsc: {e}")
+            sandbox_client = self._SandboxClient(
+                sandbox_shared_path=self._sandbox_shared_path, runsc_popen=runsc
+            )
+            overall_deadline = time.time() + self._max_runtime_seconds
+            overall_cmd = []
+            overall_code = []
+            overall_stdout = []
+            overall_stderr = []
+            for language, code in self._snippets:
+                overall_cmd.append(f"{language} /dev/stdin")
+                if len(self._snippets) == 1:
+                    overall_code = [code]
+                else:
+                    overall_code.append(f"({language}, {code})")
+                seconds_remaining = overall_deadline - time.time()
+                result = sandbox_client.code_eval(
+                    language=language,
+                    code=code,
+                    max_runtime_seconds=seconds_remaining,
                 )
-            except subprocess.CalledProcessError as e:
+                if result.stdout is not None:
+                    overall_stdout.append(result.stdout)
+                if result.stderr is not None:
+                    overall_stderr.append(result.stderr)
+            overall_stdout = self._concatenate_outputs(overall_stdout)
+            overall_stderr = self._concatenate_outputs(overall_stderr)
+            sandbox_client.copy_out()
+            sandbox_client.terminate()
+            runsc_stdout = None
+            runsc_stderr = None
+            try:
+                runsc.wait(timeout=self._TIMEOUT_SLACK_WAIT_FOR_SANDBOX_SHUTDOWN)
+            except subprocess.TimeoutExpired:
+                try:
+                    runsc.kill()
+                    runsc.wait(timeout=self._TIMEOUT_SLACK_WAIT_FOR_SANDBOX_SHUTDOWN)
+                except Exception:
+                    pass
+            if runsc.poll() is None:
+                raise self.SandboxRuntimeException("Sandbox did not terminate")
+            if runsc.returncode != 0:
                 if os.path.isfile(started_marker_path):
                     raise self.InterruptedExecutionError(
-                        code="; ".join(
-                            f"({language}, {repr(code)}))"
-                            for language, code in self._snippets
-                        ),
+                        code="; ".join(overall_code),
                         returncode=127,
                         cmd=self._sandboxed_command,
-                        output=e.stdout,
-                        stderr=e.stderr,
+                        output=overall_stdout,
+                        stderr=overall_stderr,
                     )
                 logs = {}
 
@@ -2925,109 +3367,56 @@ class Sandbox:
                         logs[filename].append(log_line)
 
                 self.debug_logs(process_log)
-                stderr = e.stderr.strip()
                 json_logs = json.dumps(logs)
+                try:
+                    runsc_memfd_stdout.seek(0)
+                    runsc_stdout = runsc_memfd_stdout.read()
+                    runsc_memfd_stderr.seek(0)
+                    runsc_stderr = runsc_memfd_stderr.read()
+                    runsc_output = (
+                        (runsc_stdout + runsc_stderr)
+                        .strip()
+                        .decode("utf-8", errors="ignore")
+                    )
+                except Exception as e:
+                    runsc_output = f"[cannot get output: {e}]"
                 if self._debug:
                     raise self.SandboxRuntimeException(
-                        f"Sandbox failed to start: {e}; stderr: {stderr}; logs: {json_logs}"
+                        f"Sandbox failed to start: {runsc.returncode}; runsc: {runsc_output}; logs: {json_logs}"
                     )
                 raise self.SandboxRuntimeException(
-                    f"Sandbox failed to start: {e} (turn on debug mode to see more information); stderr: {stderr}; logs: {json_logs}"
+                    f"Sandbox failed to start: {runsc.returncode}; (turn on debug mode to see more information); runsc: {runsc_output}; logs: {json_logs}"
                 )
-            finally:
-                resource_monitor_cancel()
             if not os.path.isfile(started_marker_path):
-                raise self.SandboxRuntimeException(
-                    "Sandbox failed to start up properly"
-                )
-            return self._process_json_wrapped_result(result)
+                raise self.SandboxRuntimeException("Sandbox failed to start up")
+            if len(overall_cmd) == 1:
+                overall_args = overall_cmd[0]
+            else:
+                overall_args = ["sh", "-c", "; ".join(overall_cmd)]
+            return subprocess.CompletedProcess(
+                args=overall_args,
+                returncode=0,
+                stdout=overall_stdout,
+                stderr=overall_stderr,
+            )
         finally:
+            if runsc_memfd_stdout is not None:
+                runsc_memfd_stdout.close()
+            if runsc_memfd_stderr is not None:
+                runsc_memfd_stderr.close()
+            if resource_monitor_cancel is not None:
+                resource_monitor_cancel()
+            if runsc is not None:
+                try:
+                    runsc.kill()
+                    try:
+                        runsc.wait(timeout=0.1)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
             if self._switcheroo is not None:
                 self._switcheroo.cleanup()
-
-    def _run_snippets(self):
-        """
-        Run all snippets in the sandbox.
-        This code is called from *within* the gVisor sandbox.
-        """
-        with open("/sandbox/started", "wb") as started_f:
-            started_f.write(b"OK\n")
-        deadline = time.time() + self._max_runtime_seconds
-        last_result = None
-        overall_args = []
-        overall_stdout = ""
-        overall_stderr = ""
-        if len(self._snippets) == 0:
-            raise self.SandboxRuntimeException("No code snippets to run")
-        for snippet in self._snippets:
-            if len(snippet) != 2:
-                raise self.SandboxRuntimeException(f"Invalid snippet: {snippet}")
-            language, code = snippet
-            if language not in self.SUPPORTED_LANGUAGES:
-                raise self.SandboxRuntimeException(f"Unsupported language: {language}")
-            interpreter_path = None
-            if language == self.LANGUAGE_BASH:
-                interpreter_path = shutil.which("bash")
-            elif language == self.LANGUAGE_PYTHON:
-                interpreter_path = sys.executable
-            if interpreter_path is None:
-                raise self.SandboxRuntimeException(
-                    f"Cannot find interpreter for language: {language}"
-                )
-            cmd = [interpreter_path, "/dev/stdin"]
-            overall_args.append(" ".join(cmd))
-            snippet_timeout = deadline - time.time()
-            if snippet_timeout <= 0.0:
-                raise self.ExecutionTimeoutError(
-                    f"Code executed the deadline of {self._max_runtime_seconds} seconds"
-                )
-            try:
-                snippet_result = subprocess.run(
-                    cmd,
-                    input=code + "\n",
-                    text=True,
-                    capture_output=True,
-                    timeout=snippet_timeout,
-                    check=True,
-                )
-            except subprocess.TimeoutExpired as e:
-                overall_stdout += e.stdout or ""
-                overall_stderr += e.stderr or ""
-                raise self.ExecutionTimeoutError(
-                    code=code,
-                    returncode=126,
-                    cmd=["sh", "-c", "; ".join(overall_args)],
-                    output=overall_stdout,
-                    stderr=overall_stderr,
-                )
-            except subprocess.CalledProcessError as e:
-                overall_stdout += e.stdout or ""
-                overall_stderr += e.stderr or ""
-                raise self.CodeExecutionError(
-                    code=code,
-                    returncode=e.returncode,
-                    cmd=["sh", "-c", "; ".join(overall_args)],
-                    output=overall_stdout,
-                    stderr=overall_stderr,
-                )
-            else:
-                last_result = snippet_result
-                overall_stdout += snippet_result.stdout or ""
-                overall_stderr += snippet_result.stderr or ""
-        assert last_result is not None, "Logic error"
-        if os.path.isdir("/sandbox/persistent"):
-            shutil.copytree(
-                "/home/user",
-                "/sandbox/persistent",
-                ignore_dangling_symlinks=True,
-                dirs_exist_ok=True,
-            )
-        return subprocess.CompletedProcess(
-            args=["sh", "-c", "; ".join(overall_args)],
-            returncode=0,
-            stdout=overall_stdout,
-            stderr=overall_stderr,
-        )
 
     def run(self) -> subprocess.CompletedProcess:
         """
@@ -3292,7 +3681,7 @@ _SAMPLE_PYTHON_INSTRUCTIONS = (
 )
 
 
-def _do_self_tests(debug):
+def _do_self_tests(debug, filter=""):
     user_storage_path = None
 
     def _want_generated_files(want_generated_files):
@@ -3582,6 +3971,7 @@ def _do_self_tests(debug):
                 print(f"    {stderr_line}")
 
     success = True
+    ran_at_least_one = False
 
     with tempfile.TemporaryDirectory(prefix="sandbox_self_test") as tmp_dir:
         user_storage_path = os.path.join(tmp_dir, "user_storage")
@@ -3589,8 +3979,12 @@ def _do_self_tests(debug):
         valve_name_prefix = (
             _Action.Valves()._VALVE_OVERRIDE_ENVIRONMENT_VARIABLE_NAME_PREFIX
         )
+        ran_at_least_one = False
         for self_test in _self_tests:
             name = self_test["name"]
+            if filter and name != filter:
+                continue
+            ran_at_least_one = True
             language = self_test["language"]
             code = "\n".join(self_test["code"]) + "\n"
             want_status = self_test["status"]
@@ -3685,6 +4079,9 @@ def _do_self_tests(debug):
                             )
                         else:
                             print(f"\u2714 Self-test {name} passed.", file=sys.stderr)
+    if not ran_at_least_one:
+        print("\u2620 No tests were ran.", file=sys.stderr)
+        sys.exit(1)
     if success:
         print("\u2705 All function self-tests passed, good go to!", file=sys.stderr)
         sys.exit(0)
@@ -3718,6 +4115,12 @@ if __name__ == "__main__":
         help="Run series of self-tests.",
     )
     parser.add_argument(
+        "--self_test_filter",
+        type=str,
+        default="",
+        help="If set, run only this self-test.",
+    )
+    parser.add_argument(
         "--debug", action="store_true", default=False, help="Enable debug mode."
     )
     parser.add_argument(
@@ -3734,7 +4137,7 @@ if __name__ == "__main__":
         ] = "true"
 
     if args.self_test:
-        _do_self_tests(args.debug)
+        _do_self_tests(debug=args.debug, filter=args.self_test_filter)
 
     if args.use_sample_code:
         if args.language == "bash":
