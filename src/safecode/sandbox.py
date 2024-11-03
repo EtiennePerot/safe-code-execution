@@ -176,6 +176,8 @@ class Sandbox:
         "/proc/cgroups",
         "/proc/mounts",
         "/proc/version",
+        "/proc/sys/kernel/unprivileged_userns_clone",
+        "/proc/sys/kernel/unprivileged_userns_apparmor_policy",
     )
 
     # Other commands worth running when dumping debug logs.
@@ -297,8 +299,9 @@ class Sandbox:
             self._log_path = log_path
             self._max_sandbox_ram_bytes = max_sandbox_ram_bytes
             self._do_resource_limiting = do_resource_limiting
-            self._my_euid = None
-            self._my_egid = None
+            self._my_uids = None
+            self._my_gids = None
+            self._initial_status_data = None
             self._checkpoint = None
             self._cgroup_controllers = None
             self._needed_controllers = set()
@@ -311,6 +314,7 @@ class Sandbox:
                 # Save EUID and EGID before we move to a new user namespace.
                 ("save_euid", self._save_euid),
                 ("save_egid", self._save_egid),
+                ("save_proc_self_status", self._save_proc_self_status),
                 ("unshare_user", self._unshare_user),
                 # Map our current user as being root in the new user namespace.
                 ("write_uid_map", self._write_uid_map),
@@ -455,19 +459,8 @@ class Sandbox:
                     )
                 )
 
-        def _status(self):
-            """
-            Return the current switcheroo status.
-
-            :return: The last successful operation name, "UNSTARTED" if unstarted, or "OK" if all done, and some information.
-            """
-            main_status = self._checkpoint
-            if self._checkpoint is None:
-                main_status = "UNSTARTED"
-            if self._checkpoint == self._operations[-1][0]:
-                main_status = "OK"
-            my_pid = os.getpid()
-            status_line = f"{main_status} (euid={self._my_euid} egid={self._my_egid} pid={my_pid} do_resource_limiting={self._do_resource_limiting} initial_cgroup_name={self._initial_cgroup_name} codeeval_cgroup_name={self._codeeval_cgroup_name} controllers={self._cgroup_controllers})"
+        def _read_proc_self_status(self):
+            """Read /proc/self/status and return some of it as a dictionary."""
             want_headers = (
                 "Name",
                 "Umask",
@@ -487,20 +480,35 @@ class Sandbox:
                 "Seccomp",
                 "Seccomp_filters",
             )
-            got_headers = {}
+            status_data = {}
+            with self._open("/proc/self/status", "rb") as status_f:
+                for line in status_f.read().decode("utf-8").splitlines():
+                    for header in want_headers:
+                        if line.startswith(f"{header}:"):
+                            status_data[header] = line.split(":")[1].strip()
+                            break
+            return status_data
+
+        def _status(self):
+            """
+            Return the current switcheroo status.
+
+            :return: The last successful operation name, "UNSTARTED" if unstarted, or "OK" if all done, and some information.
+            """
+            main_status = self._checkpoint
+            if self._checkpoint is None:
+                main_status = "UNSTARTED"
+            if self._checkpoint == self._operations[-1][0]:
+                main_status = "OK"
+            my_pid = os.getpid()
+            status_line = f"{main_status} (uids={self._my_uids} gids={self._my_gids} pid={my_pid} initial_proc_self_status={self._initial_status_data} do_resource_limiting={self._do_resource_limiting} initial_cgroup_name={self._initial_cgroup_name} codeeval_cgroup_name={self._codeeval_cgroup_name} controllers={self._cgroup_controllers})"
             try:
-                with self._open("/proc/self/status", "rb") as status_f:
-                    for line in status_f.read().decode("utf-8").splitlines():
-                        for header in want_headers:
-                            if line.startswith(f"{header}:"):
-                                got_headers[header] = line.split(":")[1].strip()
-                                break
+                status_data = self._read_proc_self_status()
             except OSError as e:
-                status_line += f" (error opening /proc/self/status: {e})"
+                status_line += f" (error parsing /proc/self/status: {e})"
             else:
-                for header in want_headers:
-                    got_value = got_headers.get(header)
-                    status_line += f" {header}={got_value}"
+                for header, value in status_data.items():
+                    status_line += f" {header}={value}"
             if self._do_resource_limiting:
                 cgroupfs_data = []
                 for cgroup_components in (
@@ -663,10 +671,13 @@ class Sandbox:
                 raise OSError(f"opening {path} mode={mode}: {e}")
 
         def _save_euid(self):
-            self._my_euid = os.geteuid()
+            self._my_uids = os.getresuid()
 
         def _save_egid(self):
-            self._my_egid = os.getegid()
+            self._my_gids = os.getresgid()
+
+        def _save_proc_self_status(self):
+            self._initial_status_data = self._read_proc_self_status()
 
         def _unshare_user(self):
             Sandbox.unshare(
@@ -675,7 +686,7 @@ class Sandbox:
 
         def _write_uid_map(self):
             with self._open("/proc/self/uid_map", "wb") as uid_map_f:
-                uid_map_f.write(f"0 {self._my_euid} 1\n".encode("ascii"))
+                uid_map_f.write(f"0 {self._my_uids[1]} 1\n".encode("ascii"))
 
         def _write_setgroups(self):
             with self._open("/proc/self/setgroups", "wb") as setgroups_f:
@@ -683,7 +694,7 @@ class Sandbox:
 
         def _write_gid_map(self):
             with self._open("/proc/self/gid_map", "wb") as gid_map_f:
-                gid_map_f.write(f"0 {self._my_egid} 1\n".encode("ascii"))
+                gid_map_f.write(f"0 {self._my_gids[1]} 1\n".encode("ascii"))
 
         def _find_self_in_cgroup_hierarchy(self):
             my_pid = os.getpid()
@@ -2340,9 +2351,14 @@ class Sandbox:
                 logs = {}
 
                 def process_log(filename, log_line):
-                    if self._debug or (
-                        log_line and log_line[0] in "WEF"
-                    ):  # Warning, Error, Fatal
+                    if (
+                        self._debug
+                        or not filename.endswith(".txt")  # Not a gVisor log file
+                        or (  # gVisor log file
+                            log_line
+                            and log_line[0] in "WEF"  # WEF: Warning, Error, Fatal
+                        )
+                    ):
                         if filename not in logs:
                             logs[filename] = []
                         logs[filename].append(log_line)
