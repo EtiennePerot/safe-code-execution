@@ -61,6 +61,20 @@ This is adequate for single-user setups not exposed to the outside Internet, whi
     * **Why**: The default SELinux label for containers (`container_t`) does not allow the creation of namespaces, which gVisor requires for additional isolation . The `container_engine_t` label allows this.
     * If you don't have SELinux enabled, this setting does nothing and may be omitted.
 
+#### Minimal Docker compose file
+
+```yaml
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    security_opt:
+      - seccomp:unconfined
+      - apparmor=unconfined
+      - label=type:container_engine_t
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+```
+
 #### Does the "hard way" actually provide more security than privileged mode?
 
 **The short answer**: Yes; a container running in privileged mode basically has full access to the host, whereas the subset of security options listed in the "hard way" still provide isolation.
