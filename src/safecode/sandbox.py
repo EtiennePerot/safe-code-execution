@@ -1784,54 +1784,6 @@ class Sandbox:
             )
 
     @classmethod
-    def check_procfs(cls):
-        """
-        Verifies that we have an unobstructed view of procfs.
-
-        :return: Nothing.
-        :raises EnvironmentNeedsSetupException: If procfs is obstructed.
-        """
-        mount_infos = []
-        with open("/proc/self/mountinfo", "rb") as mountinfo_f:
-            for line in mountinfo_f:
-                line = line.decode("utf-8").strip()
-                if not line:
-                    continue
-                mount_components = line.split(" ")
-                if len(mount_components) < 10:
-                    continue
-                hyphen_index = mount_components.index("-")
-                if hyphen_index < 6:
-                    continue
-                mount_info = {
-                    "mount_path": mount_components[4],
-                    "path_within_mount": mount_components[3],
-                    "fs_type": mount_components[hyphen_index + 1],
-                }
-                mount_infos.append(mount_info)
-        procfs_mounts = frozenset(
-            m["mount_path"]
-            for m in mount_infos
-            if m["fs_type"] == "proc" and m["path_within_mount"] == "/"
-        )
-        if len(procfs_mounts) == 0:
-            raise cls.EnvironmentNeedsSetupException(
-                "procfs is not mounted; please mount it"
-            )
-        obstructed_procfs_mounts = set()
-        for mount_info in mount_infos:
-            for procfs_mount in procfs_mounts:
-                if mount_info["mount_path"].startswith(procfs_mount + os.sep):
-                    obstructed_procfs_mounts.add(procfs_mount)
-        for procfs_mount in procfs_mounts:
-            if procfs_mount not in obstructed_procfs_mounts:
-                return  # We have at least one unobstructed procfs view.
-        assert len(obstructed_procfs_mounts) > 0, "Logic error"
-        raise cls.EnvironmentNeedsSetupException(
-            "procfs is obstructed; please mount a new procfs mount somewhere in the container, e.g. /proc2 (`--mount=type=bind,source=/proc,target=/proc2,readonly=false,bind-recursive=disabled`)"
-        )
-
-    @classmethod
     def unshare(cls, flags):
         """
         Implementation of `os.unshare` that works on Python < 3.12.
@@ -1958,7 +1910,6 @@ class Sandbox:
         cls.check_unshare()
         if require_resource_limiting:
             cls.check_cgroups()
-        cls.check_procfs()
         if not auto_install_allowed and cls.get_runsc_path() is None:
             raise cls.GVisorNotInstalledException(
                 "gVisor is not installed (runsc binary not found in $PATH); please install it or enable AUTO_INSTALL valve for auto installation"

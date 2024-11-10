@@ -51,10 +51,6 @@ This is adequate for single-user setups not exposed to the outside Internet, whi
     * On **Kubernetes**: Add a [`hostPath` volume](https://kubernetes.io/docs/concepts/storage/volumes/#hostpath) with `path` set to `/sys/fs/cgroup`, then mount it in your container's `volumeMounts` with options `mountPath` set to `/sys/fs/cgroup` and `readOnly` set to `false`.
     * **Why**: This is needed so that gVisor can create child [cgroups](https://en.wikipedia.org/wiki/Cgroups), necessary to enforce per-sandbox resource usage limits.
     * If you wish to disable resource limiting on code evaluation sandboxes, you can skip this setting and not mount `cgroupfs` at all in the container. Note that this means code evaluation sandboxes will be able to take as much CPU and memory as they want.
-* **Mount `procfs` at `/proc2`**:
-    * On **Docker**: Add `--mount=type=bind,source=/proc,target=/proc2,readonly=false,bind-recursive=disabled` to `docker run`.
-    * On **Kubernetes**: Add a [`hostPath` volume](https://kubernetes.io/docs/concepts/storage/volumes/#hostpath) with `path` set to `/proc`, then mount it in your container's `volumeMounts` with options `mountPath` set to `/proc2` and `readOnly` set to `false`.
-    * **Why**: By default, in non-privileged mode, the container runtime will mask certain sub-paths of `/proc` inside the container by creating submounts of `/proc` (e.g. `/proc/bus`, `/proc/sys`, etc.). gVisor does not really care or use anything under these sub-mounts, but *does* need to be able to mount `procfs` in the chroot environment it isolates itself in. However, its ability to mount `procfs` requires having an existing unobstructed view of `procfs` (i.e. a mount of `procfs` with no submounts). Otherwise, such mount attempts will be denied by the kernel (see the explanation for "locked" mounts on [`mount_namespaces(7)`](https://www.man7.org/linux/man-pages/man7/mount_namespaces.7.html)). Therefore, exposing an unobstructed (non-recursive) view of `/proc` elsewhere in the container filesystem (such as `/proc2`) informs the kernel that it is OK for this container to be able to mount `procfs`.
 * Remove the container's default **AppArmor profile**:
     * On **Docker**: Add `--security-opt=apparmor=unconfined` to `docker run`.
     * On **Kubernetes**: Set [`spec.securityContext.appArmorProfile.type`](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#set-the-apparmor-profile-for-a-container) to `Unconfined`.
@@ -213,7 +209,6 @@ $ git clone https://github.com/EtiennePerot/safe-code-execution && \
     --security-opt=apparmor=unconfined \
     --security-opt=label=type:container_engine_t \
     --mount=type=bind,source=/sys/fs/cgroup,target=/sys/fs/cgroup,readonly=false \
-    --mount=type=bind,source=/proc,target=/proc2,readonly=false,bind-recursive=disabled \
     --mount=type=bind,source="$(pwd)",target=/test \
     ghcr.io/open-webui/open-webui:main \
     sh -c 'python3 /test/open-webui/tools/run_code.py --self_test && python3 /test/open-webui/functions/run_code.py --self_test'
