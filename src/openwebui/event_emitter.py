@@ -127,6 +127,7 @@ class CodeExecutionTracker:
         data = {
             "type": "code_execution",
             "uuid": self._uuid,
+
             "name": self.name,
             "code": self.code,
             "language": self.language,

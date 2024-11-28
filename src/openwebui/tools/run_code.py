@@ -360,7 +360,7 @@ _SAMPLE_PYTHON_INSTRUCTIONS = (
 )
 
 
-def _do_self_tests(debug):
+def _do_self_tests(debug, filter=""):
     _self_tests = (
         {
             "name": "simple_python",
@@ -433,8 +433,12 @@ def _do_self_tests(debug):
                 print(f"    {stderr_line}")
 
     success = True
+    ran_at_least_one = False
     for self_test in _self_tests:
         name = self_test["name"]
+        if filter and name != filter:
+            continue
+        ran_at_least_one = True
         language = self_test["language"]
         code = "\n".join(self_test["code"]) + "\n"
         want_status = self_test["status"]
@@ -499,6 +503,9 @@ def _do_self_tests(debug):
                     if debug:
                         _print_output(result)
                     print(f"\u2714 Self-test {name} passed.", file=sys.stderr)
+    if not ran_at_least_one:
+        print("\u2620 No tests were ran.", file=sys.stderr)
+        sys.exit(1)
     if success:
         print("\u2705 All tool self-tests passed, good go to!", file=sys.stderr)
         sys.exit(0)
@@ -532,6 +539,12 @@ if __name__ == "__main__":
         help="Run series of self-tests.",
     )
     parser.add_argument(
+        "--self_test_filter",
+        type=str,
+        default="",
+        help="If set, run only this self-test.",
+    )
+    parser.add_argument(
         "--debug", action="store_true", default=False, help="Enable debug mode."
     )
     parser.add_argument(
@@ -548,7 +561,7 @@ if __name__ == "__main__":
         ] = "true"
 
     if args.self_test:
-        _do_self_tests(args.debug)
+        _do_self_tests(debug=args.debug, filter=args.self_test_filter)
 
     if args.use_sample_code:
         if args.language == "bash":

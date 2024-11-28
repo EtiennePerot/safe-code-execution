@@ -51,10 +51,6 @@ This is adequate for single-user setups not exposed to the outside Internet, whi
     * On **Kubernetes**: Add a [`hostPath` volume](https://kubernetes.io/docs/concepts/storage/volumes/#hostpath) with `path` set to `/sys/fs/cgroup`, then mount it in your container's `volumeMounts` with options `mountPath` set to `/sys/fs/cgroup` and `readOnly` set to `false`.
     * **Why**: This is needed so that gVisor can create child [cgroups](https://en.wikipedia.org/wiki/Cgroups), necessary to enforce per-sandbox resource usage limits.
     * If you wish to disable resource limiting on code evaluation sandboxes, you can skip this setting and not mount `cgroupfs` at all in the container. Note that this means code evaluation sandboxes will be able to take as much CPU and memory as they want.
-* **Mount `procfs` at `/proc2`**:
-    * On **Docker**: Add `--mount=type=bind,source=/proc,target=/proc2,readonly=false,bind-recursive=disabled` to `docker run`.
-    * On **Kubernetes**: Add a [`hostPath` volume](https://kubernetes.io/docs/concepts/storage/volumes/#hostpath) with `path` set to `/proc`, then mount it in your container's `volumeMounts` with options `mountPath` set to `/proc2` and `readOnly` set to `false`.
-    * **Why**: By default, in non-privileged mode, the container runtime will mask certain sub-paths of `/proc` inside the container by creating submounts of `/proc` (e.g. `/proc/bus`, `/proc/sys`, etc.). gVisor does not really care or use anything under these sub-mounts, but *does* need to be able to mount `procfs` in the chroot environment it isolates itself in. However, its ability to mount `procfs` requires having an existing unobstructed view of `procfs` (i.e. a mount of `procfs` with no submounts). Otherwise, such mount attempts will be denied by the kernel (see the explanation for "locked" mounts on [`mount_namespaces(7)`](https://www.man7.org/linux/man-pages/man7/mount_namespaces.7.html)). Therefore, exposing an unobstructed (non-recursive) view of `/proc` elsewhere in the container filesystem (such as `/proc2`) informs the kernel that it is OK for this container to be able to mount `procfs`.
 * Remove the container's default **AppArmor profile**:
     * On **Docker**: Add `--security-opt=apparmor=unconfined` to `docker run`.
     * On **Kubernetes**: Set [`spec.securityContext.appArmorProfile.type`](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#set-the-apparmor-profile-for-a-container) to `Unconfined`.
@@ -64,6 +60,20 @@ This is adequate for single-user setups not exposed to the outside Internet, whi
     * On **Kubernetes**: Set [`spec.securityContext.seLinuxOptions.type`](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#assign-selinux-labels-to-a-container) to `container_engine_t`.
     * **Why**: The default SELinux label for containers (`container_t`) does not allow the creation of namespaces, which gVisor requires for additional isolation . The `container_engine_t` label allows this.
     * If you don't have SELinux enabled, this setting does nothing and may be omitted.
+
+#### Minimal Docker compose file
+
+```yaml
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    security_opt:
+      - seccomp:unconfined
+      - apparmor=unconfined
+      - label=type:container_engine_t
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+```
 
 #### Does the "hard way" actually provide more security than privileged mode?
 
@@ -213,7 +223,6 @@ $ git clone https://github.com/EtiennePerot/safe-code-execution && \
     --security-opt=apparmor=unconfined \
     --security-opt=label=type:container_engine_t \
     --mount=type=bind,source=/sys/fs/cgroup,target=/sys/fs/cgroup,readonly=false \
-    --mount=type=bind,source=/proc,target=/proc2,readonly=false,bind-recursive=disabled \
     --mount=type=bind,source="$(pwd)",target=/test \
     ghcr.io/open-webui/open-webui:main \
     sh -c 'python3 /test/open-webui/tools/run_code.py --self_test && python3 /test/open-webui/functions/run_code.py --self_test'
@@ -263,6 +272,27 @@ RUN wget -O /tmp/runsc "https://storage.googleapis.com/gvisor/releases/release/l
     wget -O /tmp/runsc.sha512 "https://storage.googleapis.com/gvisor/releases/release/latest/$(uname -m)/runsc.sha512" && \
     cd /tmp && sha512sum -c runsc.sha512 && \
     chmod 555 /tmp/runsc && rm /tmp/runsc.sha512 && mv /tmp/runsc /usr/bin/runsc
+```
+
+</details>
+
+### **Optional**: Add packages to Open WebUI `Dockerfile`
+
+<details>
+<summary>To allow code execution sandboxes to use tools or Python packages that aren't part of the Open WebUI container image, you can preinstall them in the `Dockerfile`.</summary>
+<br/>
+
+For example, here is a sample `Dockerfile` that extends the Open WebUI container image and installs the `sudo` and `ping` tools along with some Python packages:
+
+```Dockerfile
+FROM ghcr.io/open-webui/open-webui:main
+
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get upgrade -y </dev/null && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      iputils-ping sudo \
+    </dev/null && \
+    pip install matplotlib yfinance numpy
 ```
 
 </details>

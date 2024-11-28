@@ -36,32 +36,34 @@ license: Apache-2.0
 
 import asyncio
 import argparse
-import base64
-import fcntl
 import json
-import hashlib
-import mimetypes
 import os
 import os.path
 import pydantic
-import shutil
-import stat
 import subprocess
 import sys
 import tempfile
-import time
 import typing
-import urllib.parse
-import urllib.request
-import uuid
 import inspect
+import uuid
+import base64
 import ctypes
 import ctypes.util
 import copy
+import hashlib
 import platform
 import re
+import shutil
 import signal
+import socket
+import struct
 import threading
+import time
+import urllib.request
+import fcntl
+import mimetypes
+import stat
+import urllib.parse
 import datetime
 import urllib.error
 
@@ -183,7 +185,7 @@ class _Action:
                     emitter.set_status_prefix(f"[Update available: {newer_version}] ")
                     update_check_notice = f"\n\n(Code execution function update available: [{newer_version}]({UpdateCheck.USER_URL}))"
 
-        storage = self._UserStorage(
+        storage = UserStorage(
             storage_root_path=os.path.join(
                 valves.WEB_ACCESSIBLE_DIRECTORY_PATH, "user_files"
             ),
@@ -359,7 +361,7 @@ class _Action:
                                     __id__=__id__,
                                     intake_path=sandbox_storage_path,
                                 )
-                        except self._UserStorage.OutOfStorageException as e:
+                        except UserStorage.OutOfStorageException as e:
                             status = "STORAGE_ERROR"
                             output = f"Storage quota exceeded: {e}"
                             await emitter.fail(output)
@@ -427,13 +429,30 @@ class _Action:
                     await emitter.message(
                         f"\n\n---\nI executed this {language_title} code and it timed out after {self.valves.MAX_RUNTIME_SECONDS} seconds.\n{update_check_notice}"
                     )
-            if status == "ERROR" and output:
+            elif status == "INTERRUPTED":
+                if output:
+                    await emitter.message(
+                        f"\n\n---\nI executed this {language_title} code and used too many resources.\n```Error\n{output}\n```\n{update_check_notice}"
+                    )
+                else:
+                    await emitter.message(
+                        f"\n\n---\nI executed this {language_title} code and used too many resources.\n{update_check_notice}"
+                    )
+            elif status == "STORAGE_ERROR":
+                await emitter.message(
+                    f"\n\n---\nI executed this {language_title} code but it exceeded the storage quota.\n```Error\n{output}\n```\n{update_check_notice}"
+                )
+            elif status == "ERROR" and output:
                 await emitter.message(
                     f"\n\n---\nI executed this {language_title} code and got the following error:\n```Error\n{output}\n```\n{update_check_notice}"
                 )
-            else:
+            elif status == "ERROR":
                 await emitter.message(
                     f"\n\n---\nI executed this {language_title} code but got an unexplained error.\n{update_check_notice}"
+                )
+            else:
+                raise Sandbox.SandboxRuntimeException(
+                    f"Unexplained status: {status} (output: {output})"
                 )
             return json.dumps({"status": status, "output": output})
         except Sandbox.PlatformNotSupportedException as e:
@@ -446,486 +465,6 @@ class _Action:
             return await _fail(f"Sandbox exception: {e}")
         except Exception as e:
             return await _fail(f"Unhandled exception: {e}")
-
-    class _UserFile:
-        MAX_INLINE_URL_SIZE = 0
-        MAX_INLINE_TEXT_LINES = 128
-        MAX_INLINE_TEXT_BYTES = 65535
-
-        def __init__(self, file_path, file_relative_path, file_url, file_size):
-            self._file_path = file_path
-            self._file_relative_path = file_relative_path
-            self._file_url = file_url
-            self._size_bytes = file_size
-            mimetypes.init()
-            mime_type, _ = mimetypes.guess_type(file_path)
-            if mime_type is None:
-                mime_type, _ = mimetypes.guess_type(file_url)
-            if mime_type is None:
-                # Check if the file is valid UTF-8 text.
-                is_utf8 = True
-                is_empty = True
-                with open(self._file_path, "rb") as f:
-                    for line in f:
-                        is_empty = is_empty or len(line) > 0
-                        try:
-                            line.decode("utf-8")
-                        except UnicodeDecodeError:
-                            is_utf8 = False
-                mime_type = (
-                    "text/plain"
-                    if (is_utf8 and not is_empty)
-                    else "application/octet-stream"
-                )
-            self._mime_type = mime_type
-            self._cached_markdown = None
-
-        @property
-        def name(self):
-            return self._file_relative_path
-
-        @property
-        def url(self):
-            if self._size_bytes > 0 and self._size_bytes <= self.MAX_INLINE_URL_SIZE:
-                # Try to use an inline URL.
-                with open(self._file_path, "rb") as f:
-                    contents = f.read()
-                inline_url = f"data:{self._mime_type}," + urllib.parse.quote_from_bytes(
-                    contents
-                )
-                inline_base64 = (
-                    f"data:{self._mime_type};base64,"
-                    + base64.standard_b64encode(contents).decode("ascii")
-                )
-                shortest_url = (
-                    inline_url
-                    if len(inline_url) < len(inline_base64)
-                    else inline_base64
-                )
-                if len(shortest_url) <= self.MAX_INLINE_URL_SIZE:
-                    return shortest_url
-            return self._file_url
-
-        def _inline_markdown(self):
-            """Render the file as inline text or markdown if small enough; otherwise return None."""
-            if self._size_bytes > self.MAX_INLINE_TEXT_BYTES:
-                return None
-            if self._mime_type.startswith("image/"):
-                return f"\U0001f5bc [{self.name}]({self.url}):  \n![{self.name}]({self.url})"
-            if not self._mime_type.startswith("text/"):
-                return None
-            with open(self._file_path, "rb") as f:
-                try:
-                    contents = f.read().decode("utf-8")
-                except UnicodeDecodeError:
-                    return None
-            lines = contents.split("\n")
-            if len(lines) > self.MAX_INLINE_TEXT_LINES:
-                return None
-            if self._mime_type != "text/markdown":
-                if "```" in contents:
-                    return None
-                if contents and contents[-1] == "\n":
-                    contents = contents[:-1]
-                return f"\U0001f4c4 [{self.name}]({self.url}):\n```\n{contents}\n```"
-            components = [f"\U0001f4c3 [{self.name}]({self.url}):"]
-            for line in lines:
-                components.append(f"> {line}")
-            if components[-1] == "> ":
-                components = components[:-1]
-            return "\n".join(components)
-
-        def _markdown(self):
-            if self._size_bytes == 0:
-                return f"\u2049 `{self.name}` (empty)"
-            inline_markdown = self._inline_markdown()
-            if inline_markdown is not None:
-                return inline_markdown
-            icon = "\U0001f4be"
-            if self._mime_type.startswith("text/"):
-                icon = "\U0001f4c4"
-            elif self._mime_type.startswith("image/"):
-                icon = "\U0001f5bc"
-            elif self._mime_type.startswith("audio/"):
-                icon = "\U0001f3b5"
-            elif self._mime_type.startswith("video/"):
-                icon = "\U0001f3ac"
-            size = f"{self._size_bytes} bytes"
-            if self._size_bytes > 1024 * 1024 * 1024:
-                size = f"{self._size_bytes // 1024 // 1024 // 1024} GiB"
-            elif self._size_bytes > 1024 * 1024:
-                size = f"{self._size_bytes // 1024 // 1024} MiB"
-            elif self._size_bytes > 1024:
-                size = f"{self._size_bytes // 1024} KiB"
-            return f"{icon} [{self.name}]({self.url}) ({size})"
-
-        def markdown(self):
-            if self._cached_markdown is None:
-                self._cached_markdown = self._markdown()
-            return self._cached_markdown
-
-    class _UserStorage:
-        class StorageException(Exception):
-            """Base class for storage-related exceptions."""
-
-        class OutOfStorageException(Exception):
-            """Not enough files or bytes quota."""
-
-        class EnvironmentNeedsSetupException(Exception):
-            """Storage is badly configured."""
-
-        # Number of zeroes to use in nonces (in per-day storage directories).
-        # This effectively limits the number of nonces usable in a given day.
-        NUM_NONCE_ZEROS = 4
-
-        # Free space buffer to keep free on the underlying storage device,
-        # rather than allowing user storage to fill it to the brim.
-        MUST_KEEP_FREE_MARGIN_MEGABYTES = 512
-
-        @classmethod
-        def measure_directory(cls, path, predicate=None):
-            """
-            Measure storage cost of a directory.
-
-            :param path: Path to the directory to measure.
-            :param predicate: Optional predicate to filter files and directories, called with absolute paths.
-            :return: 2-tuple `(total_files, total_bytes)`. Note that `total_files` counts the number of non-root directories as well, and `total_bytes` also includes storage necessary to store filenames and directory names.
-            """
-            path = os.path.normpath(os.path.abspath(path))
-            total_files = 0
-            total_bytes = 0
-            try:
-                for dirpath, subdirs, subfiles in os.walk(
-                    path, onerror=None, followlinks=False
-                ):
-                    dirpath = os.path.normpath(os.path.abspath(dirpath))
-                    for subdir in subdirs:
-                        if predicate is None or predicate(
-                            os.path.join(dirpath, subdir)
-                        ):
-                            total_files += 1
-                            total_bytes += len(subdir)
-                    for subfile in subfiles:
-                        subfile_path = os.path.join(dirpath, subfile)
-                        if predicate is not None and not predicate(subfile_path):
-                            continue
-                        try:
-                            subfile_stat = os.stat(subfile_path, follow_symlinks=False)
-                        except FileNotFoundError:
-                            continue  # Likely raced with another execution.
-                        if not stat.S_ISREG(subfile_stat.st_mode):
-                            continue  # Ignore non-regular files.
-                        total_files += 1
-                        total_bytes += len(subfile)
-                        total_bytes += subfile_stat.st_size
-            except OSError as e:
-                raise cls.EnvironmentNeedsSetupException(
-                    f"Failed to explore directory {path} (please adjust permissions): {e}"
-                )
-            return total_files, total_bytes
-
-        def __init__(
-            self,
-            storage_root_path,
-            storage_root_url,
-            __user__: typing.Optional[dict] = None,
-            max_files_per_user=None,
-            max_bytes_per_user=None,
-        ):
-            if storage_root_path.startswith("$DATA_DIR" + os.sep):
-                if "DATA_DIR" not in os.environ:
-                    data_dir = "/app/backend/data"
-                    if not os.path.isdir(data_dir):
-                        if os.path.isdir("/app/backend"):
-                            os.makedirs(data_dir, mode=0o755)
-                        else:
-                            raise self.EnvironmentNeedsSetupException(
-                                f"DATA_DIR specified in user storage configuration ({storage_root_path}), but not specified in environment, and default path '/app/backend/data' does not exist; please create it or configure user storage directory."
-                            )
-                else:
-                    data_dir = os.environ["DATA_DIR"]
-                storage_root_path = os.path.join(
-                    data_dir,
-                    storage_root_path[len("$DATA_DIR" + os.sep) :].lstrip(os.sep),
-                )
-            self._storage_root_path = os.path.normpath(
-                os.path.abspath(storage_root_path)
-            )
-            try:
-                os.makedirs(self._storage_root_path, mode=0o755, exist_ok=True)
-            except OSError as e:
-                raise self.EnvironmentNeedsSetupException(
-                    f"User storage directory ({self._storage_root_path}) does not exist and cannot automatically create it ({e}); please create it or reconfigure it."
-                )
-            self._storage_root_url = storage_root_url.rstrip("/")
-            self._date = time.strftime("%Y/%m/%d")
-            self._max_files_per_user = max_files_per_user
-            self._max_bytes_per_user = max_bytes_per_user
-            self._user = f"anon_{self._date}"
-            if __user__ is not None:
-                if type(__user__) is type({}):
-                    self._user = str(
-                        "|".join(
-                            f"{k}={v}"
-                            for k, v in sorted(__user__.items(), key=lambda x: x[0])
-                        )
-                    )
-                else:
-                    self._user = str(__user__)
-            user_hash = hashlib.sha512()
-            user_hash.update(self._user.encode("utf-8"))
-            self._user_hash = (
-                base64.b32encode(user_hash.digest()).decode("ascii").lower()[:12]
-            )
-            self._user_path = os.path.join(storage_root_path, self._user_hash)
-            self._lock_fd = None
-
-        def __enter__(self):
-            assert self._lock_fd is None
-            os.makedirs(self._user_path, mode=0o755, exist_ok=True)
-            lock_fd = os.open(
-                os.path.join(self._user_path, ".lock"),
-                os.O_RDWR | os.O_CREAT | os.O_TRUNC,
-            )
-            deadline = time.time() + 10
-            last_exception = None
-            while time.time() < deadline:
-                try:
-                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except (IOError, OSError) as e:
-                    last_exception = e
-                    time.sleep(0.01)
-                else:
-                    self._lock_fd = lock_fd
-                    break
-            if self._lock_fd is None:
-                os.close(lock_fd)
-                raise self.StorageException(
-                    f"Cannot lock storage directory (too many concurrent code executions?) {last_exception}"
-                )
-
-        def __exit__(self, *args, **kwargs):
-            assert self._lock_fd is not None
-            fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
-            os.close(self._lock_fd)
-            self._lock_fd = None
-
-        def _is_user_file(self, path):
-            """Used as predicate when measuring user storage directories."""
-            assert path.startswith(self._user_path + os.sep)
-            path = path[len(self._user_path) + len(os.sep) :]
-            # User files are under:
-            # YYYY/MM/DD/NONCE/HASH (5 levels of nesting).
-            # So a real user file has at least 6 components, which means it
-            # must have at least 5 slashes.
-            return path.count(os.sep) >= 5
-
-        def copy(self, __id__, intake_path):
-            """
-            Copy a directory to user storage.
-            Ensure that the user storage has room for the given number of files totaling the given number of bytes.
-            If this is feasible by deleting previous user files, it will do so.
-            Must be done while holding the lock.
-
-            :param __id__: Chat or action ID.
-            :param intake_path: Path to a directory that should be copied to the user storage.
-            :raises OutOfStorageException: If there is not enough available file or bytes quota.
-            :return: A list of `_UserFile`s from each file copied from `intake_path`.
-            """
-            assert (
-                self._lock_fd is not None
-            ), "Cannot perform this operation without holding the lock"
-            want_num_files, want_num_bytes = self.measure_directory(intake_path)
-            if want_num_files == 0:
-                return ()  # Nothing to copy.
-            if self._max_files_per_user <= want_num_files:
-                raise self.OutOfStorageException(
-                    f"Cannot allocate storage for {want_num_files} files; maximum is {self._max_files_per_user} files per user"
-                )
-            if self._max_bytes_per_user <= want_num_bytes:
-                raise self.OutOfStorageException(
-                    f"Cannot allocate storage for {want_num_bytes} bytes; maximum is {self._max_bytes_per_user} bytes per user"
-                )
-            disk_usage_free = shutil.disk_usage(self._user_path).free
-            if (
-                disk_usage_free
-                <= want_num_bytes + self.MUST_KEEP_FREE_MARGIN_MEGABYTES * 1024 * 1024
-            ):
-                raise self.OutOfStorageException(
-                    f"Not enough free disk space for {want_num_bytes} bytes; current free space is {disk_usage_free} bytes and must keep at least {self.MUST_KEEP_FREE_MARGIN_MEGABYTES} megabytes free"
-                )
-            user_root_num_files, user_root_num_bytes = self.measure_directory(
-                self._user_path,
-                predicate=self._is_user_file,
-            )
-            user_root_remaining_files = self._max_files_per_user - user_root_num_files
-            user_root_remaining_bytes = self._max_bytes_per_user - user_root_num_bytes
-            while (
-                user_root_remaining_files < want_num_files
-                or user_root_remaining_bytes < want_num_bytes
-            ):
-                oldest_directory = None
-                try:
-                    oldest_yyyy = next(
-                        iter(
-                            sorted(
-                                f
-                                for f in os.listdir(self._user_path)
-                                if len(f) >= 4 and f.isdigit()
-                            )
-                        )
-                    )
-                    oldest_mm = next(
-                        iter(
-                            sorted(
-                                f
-                                for f in os.listdir(
-                                    os.path.join(self._user_path, oldest_yyyy)
-                                )
-                                if len(f) == 2 and f.isdigit()
-                            )
-                        )
-                    )
-                    oldest_dd = next(
-                        iter(
-                            sorted(
-                                f
-                                for f in os.listdir(
-                                    os.path.join(
-                                        self._user_path, oldest_yyyy, oldest_mm
-                                    )
-                                )
-                                if len(f) == 2 and f.isdigit()
-                            )
-                        )
-                    )
-                    oldest_nonce = next(
-                        iter(
-                            sorted(
-                                f
-                                for f in os.listdir(
-                                    os.path.join(
-                                        self._user_path,
-                                        oldest_yyyy,
-                                        oldest_mm,
-                                        oldest_dd,
-                                    )
-                                )
-                                if len(f) == self.NUM_NONCE_ZEROS and f.isdigit()
-                            )
-                        )
-                    )
-                    oldest_directory = os.path.join(
-                        self._user_path, oldest_yyyy, oldest_mm, oldest_dd, oldest_nonce
-                    )
-                except StopIteration:
-                    raise self.OutOfStorageException(
-                        f"Cannot find directory to clear in order to make enough room for new user storage ({want_num_files} files, {want_num_bytes} bytes)"
-                    )
-                assert oldest_directory is not None
-                if not shutil.rmtree.avoids_symlink_attacks:
-                    raise self.EnvironmentNeedsSetupException(
-                        "Only supported on platforms with symlink-attack-resistant rmtree implementations"
-                    )
-                shutil.rmtree(oldest_directory)
-                for parent_directory in (
-                    os.path.join(self._user_path, oldest_yyyy, oldest_mm, oldest_dd),
-                    os.path.join(self._user_path, oldest_yyyy, oldest_mm),
-                    os.path.join(self._user_path, oldest_yyyy),
-                ):
-                    if len(os.listdir(parent_directory)) == 0:
-                        os.rmdir(parent_directory)
-                user_root_num_files, user_root_num_bytes = self.measure_directory(
-                    self._user_path,
-                    predicate=self._is_user_file,
-                )
-                user_root_remaining_files = (
-                    self._max_files_per_user - user_root_num_files
-                )
-                user_root_remaining_bytes = (
-                    self._max_bytes_per_user - user_root_num_bytes
-                )
-
-            # We now have enough. Find new directory name.
-            path_with_counter = None
-            max_nonce = 10**self.NUM_NONCE_ZEROS - 1
-            for nonce in range(
-                1, min(self._max_files_per_user or max_nonce, max_nonce)
-            ):
-                path_with_counter = os.path.join(
-                    self._user_path, self._date, str(nonce).zfill(self.NUM_NONCE_ZEROS)
-                )
-                try:
-                    os.makedirs(path_with_counter, mode=0o755, exist_ok=False)
-                except FileExistsError:
-                    pass
-                else:
-                    break
-            if path_with_counter is None:
-                raise self.OutOfStorageException("No free storage directory available!")
-            id_str = str(__id__) if __id__ is not None else self._date
-            id_hash = hashlib.sha512()
-            id_hash.update(self._user.encode("utf-8"))
-            id_hash.update(b"||||")
-            id_hash.update(self._date.encode("utf-8"))
-            id_hash.update(b"||||")
-            id_hash.update(path_with_counter.encode("utf-8"))
-            id_hash.update(b"||||")
-            id_hash.update(str(uuid.uuid4()).encode("utf-8"))
-            id_hash.update(b"||||")
-            id_hash.update(id_str.encode("utf-8"))
-            id_hash_component = (
-                base64.b32encode(id_hash.digest()).decode("ascii").lower()[:12]
-            )
-            final_path = os.path.normpath(
-                os.path.abspath(os.path.join(path_with_counter, id_hash_component))
-            )
-
-            # Now do the copy.
-            # This doesn't use `shutil.copytree` because we explicitly avoid copying anything but regular files.
-            user_files = []
-            for dirpath, subdirs, subfiles in os.walk(
-                intake_path, onerror=None, followlinks=False
-            ):
-                dirpath = os.path.normpath(os.path.abspath(dirpath))
-                relative_dirpath = None
-                if dirpath == intake_path:
-                    relative_dirpath = "."
-                elif dirpath.startswith(intake_path + os.sep):
-                    relative_dirpath = dirpath[len(intake_path) + len(os.sep) :]
-                else:
-                    assert False, f"Bad traversal: expected all paths to starts with {intake_path} but got path that does not: {dirpath}"
-                assert relative_dirpath is not None
-                assert not os.path.isabs(relative_dirpath)
-                copy_dirpath = os.path.join(final_path, relative_dirpath)
-                os.makedirs(copy_dirpath, mode=0o755, exist_ok=True)
-                for subfile in subfiles:
-                    subfile_path = os.path.join(dirpath, subfile)
-                    subfile_relative_path = os.path.normpath(
-                        os.path.join(relative_dirpath, subfile)
-                    )
-                    assert not os.path.isabs(subfile_relative_path)
-                    subfile_stat = os.stat(subfile_path, follow_symlinks=False)
-                    if not stat.S_ISREG(subfile_stat.st_mode):
-                        continue  # Ignore non-regular files.
-                    subfile_copy = os.path.join(copy_dirpath, subfile)
-                    assert subfile_copy.startswith(self._storage_root_path + os.sep)
-                    subfile_url = f"{self._storage_root_url}/" + urllib.parse.quote(
-                        subfile_copy[len(self._storage_root_path) + len(os.sep) :],
-                        safe=os.sep,
-                    )
-                    shutil.move(subfile_path, subfile_copy, copy_function=shutil.copy)
-                    user_files.append(
-                        _Action._UserFile(
-                            file_path=subfile_copy,
-                            file_relative_path=subfile_relative_path,
-                            file_url=subfile_url,
-                            file_size=subfile_stat.st_size,
-                        )
-                    )
-
-            # We are done.
-            return user_files
 
 
 class Action:
@@ -1232,6 +771,8 @@ class Sandbox:
         "/proc/cgroups",
         "/proc/mounts",
         "/proc/version",
+        "/proc/sys/kernel/unprivileged_userns_clone",
+        "/proc/sys/kernel/unprivileged_userns_apparmor_policy",
     )
 
     # Other commands worth running when dumping debug logs.
@@ -1249,7 +790,28 @@ class Sandbox:
 
     # Re-execution stages.
     _STAGE_SANDBOX = "SANDBOX"
-    _STAGE_SNIPPET = "SNIPPET"
+    _STAGE_SERVER = "SERVER"
+
+    # Timeout slack in max runtime enforcement, from deepest to shallowest.
+    _TIMEOUT_SLACK_FINAL = 0.25  # Actual code execution
+    _TIMEOUT_SLACK_CONNECT = (
+        _TIMEOUT_SLACK_FINAL + 0.5
+    )  # Connect to code evaluation server
+    _TIMEOUT_SLACK_CONNECT_FIRST_REQUEST = (
+        _TIMEOUT_SLACK_FINAL + 5
+    )  # Connect to code evaluation server for first request
+    _TIMEOUT_SLACK_CODE_EVAL_REQUEST = (
+        _TIMEOUT_SLACK_CONNECT + 2.0
+    )  # Send and receive code evaluation request data
+    _TIMEOUT_SLACK_COPY_OUT = (
+        _TIMEOUT_SLACK_FINAL + 5
+    )  # Copy files from persistent directory
+    _TIMEOUT_SLACK_TERMINATE = (
+        _TIMEOUT_SLACK_FINAL + 0.5
+    )  # Terminate code evaluation server
+    _TIMEOUT_SLACK_WAIT_FOR_SANDBOX_SHUTDOWN = (
+        _TIMEOUT_SLACK_FINAL + 1
+    )  # Wait for sandbox process to exit.
 
     # libc bindings.
     # Populated using `_libc`.
@@ -1332,8 +894,9 @@ class Sandbox:
             self._log_path = log_path
             self._max_sandbox_ram_bytes = max_sandbox_ram_bytes
             self._do_resource_limiting = do_resource_limiting
-            self._my_euid = None
-            self._my_egid = None
+            self._my_uids = None
+            self._my_gids = None
+            self._initial_status_data = None
             self._checkpoint = None
             self._cgroup_controllers = None
             self._needed_controllers = set()
@@ -1346,6 +909,7 @@ class Sandbox:
                 # Save EUID and EGID before we move to a new user namespace.
                 ("save_euid", self._save_euid),
                 ("save_egid", self._save_egid),
+                ("save_proc_self_status", self._save_proc_self_status),
                 ("unshare_user", self._unshare_user),
                 # Map our current user as being root in the new user namespace.
                 ("write_uid_map", self._write_uid_map),
@@ -1490,19 +1054,8 @@ class Sandbox:
                     )
                 )
 
-        def _status(self):
-            """
-            Return the current switcheroo status.
-
-            :return: The last successful operation name, "UNSTARTED" if unstarted, or "OK" if all done, and some information.
-            """
-            main_status = self._checkpoint
-            if self._checkpoint is None:
-                main_status = "UNSTARTED"
-            if self._checkpoint == self._operations[-1][0]:
-                main_status = "OK"
-            my_pid = os.getpid()
-            status_line = f"{main_status} (euid={self._my_euid} egid={self._my_egid} pid={my_pid} do_resource_limiting={self._do_resource_limiting} initial_cgroup_name={self._initial_cgroup_name} codeeval_cgroup_name={self._codeeval_cgroup_name} controllers={self._cgroup_controllers})"
+        def _read_proc_self_status(self):
+            """Read /proc/self/status and return some of it as a dictionary."""
             want_headers = (
                 "Name",
                 "Umask",
@@ -1522,20 +1075,35 @@ class Sandbox:
                 "Seccomp",
                 "Seccomp_filters",
             )
-            got_headers = {}
+            status_data = {}
+            with self._open("/proc/self/status", "rb") as status_f:
+                for line in status_f.read().decode("utf-8").splitlines():
+                    for header in want_headers:
+                        if line.startswith(f"{header}:"):
+                            status_data[header] = line.split(":")[1].strip()
+                            break
+            return status_data
+
+        def _status(self):
+            """
+            Return the current switcheroo status.
+
+            :return: The last successful operation name, "UNSTARTED" if unstarted, or "OK" if all done, and some information.
+            """
+            main_status = self._checkpoint
+            if self._checkpoint is None:
+                main_status = "UNSTARTED"
+            if self._checkpoint == self._operations[-1][0]:
+                main_status = "OK"
+            my_pid = os.getpid()
+            status_line = f"{main_status} (uids={self._my_uids} gids={self._my_gids} pid={my_pid} initial_proc_self_status={self._initial_status_data} do_resource_limiting={self._do_resource_limiting} initial_cgroup_name={self._initial_cgroup_name} codeeval_cgroup_name={self._codeeval_cgroup_name} controllers={self._cgroup_controllers})"
             try:
-                with self._open("/proc/self/status", "rb") as status_f:
-                    for line in status_f.read().decode("utf-8").splitlines():
-                        for header in want_headers:
-                            if line.startswith(f"{header}:"):
-                                got_headers[header] = line.split(":")[1].strip()
-                                break
+                status_data = self._read_proc_self_status()
             except OSError as e:
-                status_line += f" (error opening /proc/self/status: {e})"
+                status_line += f" (error parsing /proc/self/status: {e})"
             else:
-                for header in want_headers:
-                    got_value = got_headers.get(header)
-                    status_line += f" {header}={got_value}"
+                for header, value in status_data.items():
+                    status_line += f" {header}={value}"
             if self._do_resource_limiting:
                 cgroupfs_data = []
                 for cgroup_components in (
@@ -1698,10 +1266,13 @@ class Sandbox:
                 raise OSError(f"opening {path} mode={mode}: {e}")
 
         def _save_euid(self):
-            self._my_euid = os.geteuid()
+            self._my_uids = os.getresuid()
 
         def _save_egid(self):
-            self._my_egid = os.getegid()
+            self._my_gids = os.getresgid()
+
+        def _save_proc_self_status(self):
+            self._initial_status_data = self._read_proc_self_status()
 
         def _unshare_user(self):
             Sandbox.unshare(
@@ -1710,7 +1281,7 @@ class Sandbox:
 
         def _write_uid_map(self):
             with self._open("/proc/self/uid_map", "wb") as uid_map_f:
-                uid_map_f.write(f"0 {self._my_euid} 1\n".encode("ascii"))
+                uid_map_f.write(f"0 {self._my_uids[1]} 1\n".encode("ascii"))
 
         def _write_setgroups(self):
             with self._open("/proc/self/setgroups", "wb") as setgroups_f:
@@ -1718,7 +1289,7 @@ class Sandbox:
 
         def _write_gid_map(self):
             with self._open("/proc/self/gid_map", "wb") as gid_map_f:
-                gid_map_f.write(f"0 {self._my_egid} 1\n".encode("ascii"))
+                gid_map_f.write(f"0 {self._my_gids[1]} 1\n".encode("ascii"))
 
         def _find_self_in_cgroup_hierarchy(self):
             my_pid = os.getpid()
@@ -2193,6 +1764,315 @@ class Sandbox:
 
             return _cancel
 
+    class _InSandboxServer:
+        """
+        Server that runs inside the gVisor sandbox.
+        """
+
+        def __init__(self):
+            pass
+
+        def run(self):
+            """
+            Run a server loop inside the server listening on UDS.
+            This code is called from *within* the gVisor sandbox.
+            """
+            keep_going = True
+            server_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server_socket.bind("/sandbox/socket")
+            server_socket.listen(1)
+            server_socket_closed = False
+            try:
+                with open("/sandbox/started", "wb") as started_f:
+                    started_f.write(b"OK\n")
+                while keep_going:
+                    client_socket, _ = server_socket.accept()
+                    try:
+                        request_size_buf = client_socket.recv(8)
+                        if len(request_size_buf) != 8:
+                            raise Sandbox.SandboxRuntimeException(
+                                f"Server did not receive 8 bytes for request size: {repr(request_size_buf)}"
+                            )
+                        request_length = struct.unpack(">Q", request_size_buf)[0]
+                        request_bytes = []
+                        remaining_bytes = request_length
+                        while remaining_bytes > 0:
+                            packet_size = min(remaining_bytes, 0x100000)
+                            request_data = client_socket.recv(packet_size)
+                            if len(request_data) == 0:
+                                break
+                            remaining_bytes -= len(request_data)
+                            request_bytes.append(request_data)
+                        if remaining_bytes > 0:
+                            raise Sandbox.SandboxRuntimeException(
+                                f"Got partial request; {remaining_bytes}/{request_length} bytes still expected"
+                            )
+                        request_data = json.loads(
+                            (b"".join(request_bytes)).decode("utf-8")
+                        )
+                        if "type" not in request_data or "kwargs" not in request_data:
+                            raise Sandbox.SandboxRuntimeException(
+                                f"Invalid request to in-sandbox server: {request_data}"
+                            )
+                        request_type = request_data["type"]
+                        request_kwargs = request_data.get("kwargs", {})
+                        response = None
+                        if request_type == "code_eval":
+                            response = self._handle_code_eval(**request_kwargs)
+                        elif request_type == "copy_out":
+                            response = self._handle_copy_out(**request_kwargs)
+                        elif request_type == "terminate":
+                            keep_going = False
+                            server_socket.close()
+                            server_socket_closed = True
+                            response = {}
+                        else:
+                            raise Sandbox.SandboxRuntimeException(
+                                f"Invalid request type: {request_type}"
+                            )
+                    except Exception as e:
+                        response = {"exception": Sandbox._json_exception_encode(e)}
+                    assert response is not None, "Logic error"
+                    try:
+                        response_bytes = json.dumps(response).encode("utf-8")
+                        client_socket.sendall(struct.pack(">Q", len(response_bytes)))
+                        client_socket.sendall(response_bytes)
+                    finally:
+                        client_socket.close()
+            finally:
+                if not server_socket_closed:
+                    server_socket.close()
+
+        def _handle_code_eval(self, language, code, max_runtime_seconds):
+            """
+            Handle a single code evaluation request.
+            """
+            if language not in Sandbox.SUPPORTED_LANGUAGES:
+                raise Sandbox.SandboxRuntimeException(
+                    f"Unsupported language: {language}"
+                )
+            interpreter_path = None
+            if language == Sandbox.LANGUAGE_BASH:
+                interpreter_path = shutil.which("bash")
+            elif language == Sandbox.LANGUAGE_PYTHON:
+                interpreter_path = sys.executable
+            if interpreter_path is None:
+                raise Sandbox.SandboxRuntimeException(
+                    f"Cannot find interpreter for language: {language}"
+                )
+            cmd = [interpreter_path, "/dev/stdin"]
+            if max_runtime_seconds <= 0.0:
+                raise Sandbox.SandboxRuntimeException(
+                    "Exceeded the code execution deadline"
+                )
+            try:
+                result = subprocess.run(
+                    cmd,
+                    input=code + "\n",
+                    text=True,
+                    capture_output=True,
+                    timeout=max_runtime_seconds + Sandbox._TIMEOUT_SLACK_FINAL,
+                    check=True,
+                )
+            except subprocess.TimeoutExpired as e:
+                raise Sandbox.ExecutionTimeoutError(
+                    code=code,
+                    returncode=126,
+                    cmd=cmd,
+                    output=e.stdout or "",
+                    stderr=e.stderr or "",
+                )
+            except subprocess.CalledProcessError as e:
+                raise Sandbox.CodeExecutionError(
+                    code=code,
+                    returncode=e.returncode,
+                    cmd=cmd,
+                    output=e.stdout or "",
+                    stderr=e.stderr or "",
+                )
+            else:
+                return {
+                    "args": cmd,
+                    "returncode": 0,
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                }
+
+        def _handle_copy_out(self):
+            if os.path.isdir("/sandbox/persistent"):
+                shutil.copytree(
+                    "/home/user",
+                    "/sandbox/persistent",
+                    ignore_dangling_symlinks=True,
+                    dirs_exist_ok=True,
+                )
+            return {}
+
+    class _SandboxClient:
+        """
+        Client counterpart to `_InSandboxServer`.
+        This runs outside of the gVisor sandbox.
+        """
+
+        class _RequestTimeoutError(Exception):
+            """Raised when _request takes too long."""
+
+        class _ServerDiedError(Exception):
+            """Raised when the server dies mid-request."""
+
+        def __init__(self, sandbox_shared_path, runsc_popen):
+            """
+            Constructor.
+
+            :param sandbox_shared_path: Path to the dir mounted as /sandbox in the sandbox.
+            :param runsc_popen: subprocess.Popen object to runsc, to check for liveness.
+            """
+            self._sandbox_shared_path = sandbox_shared_path
+            self._runsc_popen = runsc_popen
+            self._first_request = True
+
+        def _check_server_alive(self):
+            """Check if the server is alive.
+
+            :return: True if the server is still alive.
+            :raises _ServerDiedError: If the server is not alive.
+            """
+            try:
+                self._runsc_popen.wait(timeout=Sandbox._TIMEOUT_SLACK_CONNECT)
+            except subprocess.TimeoutExpired:
+                return True
+            else:
+                raise self._ServerDiedError()
+
+        def _request(self, request_type, deadline, **request_kwargs):
+            """Connect and get a socket to the server."""
+            if self._first_request:
+                connect_deadline = min(
+                    deadline, time.time() + Sandbox._TIMEOUT_SLACK_CONNECT_FIRST_REQUEST
+                )
+                self._first_request = False
+            else:
+                connect_deadline = min(
+                    deadline, time.time() + Sandbox._TIMEOUT_SLACK_CONNECT
+                )
+            started_marker_path = os.path.join(self._sandbox_shared_path, "started")
+            while time.time() < connect_deadline and not os.path.exists(
+                started_marker_path
+            ):
+                time.sleep(0.05)
+            if time.time() >= connect_deadline and not os.path.exists(
+                started_marker_path
+            ):
+                raise Sandbox.SandboxRuntimeException(
+                    f"Sandbox did not start in time: {started_marker_path} still does not exist"
+                )
+            client_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            socket_path = os.path.join(self._sandbox_shared_path, "socket")
+            try:
+                client_socket.connect(socket_path)
+            except Exception as e:
+                raise Sandbox.SandboxRuntimeException(
+                    f"Cannot connect to socket at {socket_path}: {e}"
+                )
+            try:
+                client_socket.settimeout(0.5)
+                request_bytes = json.dumps(
+                    {
+                        "type": request_type,
+                        "kwargs": request_kwargs,
+                    }
+                ).encode("utf-8")
+                client_socket.sendall(struct.pack(">Q", len(request_bytes)))
+                client_socket.sendall(request_bytes)
+                response_size = None
+                remaining_bytes = -1
+                response_bytes = []
+                while (
+                    response_size is None or remaining_bytes > 0
+                ) and time.time() < deadline:
+                    try:
+                        if response_size is None:
+                            response_size_buf = client_socket.recv(8)
+                            if len(response_size_buf) != 8:
+                                self._check_server_alive()
+                                raise Sandbox.SandboxRuntimeException(
+                                    f"Client did not get 8 bytes for response size: {repr(response_size_buf)}"
+                                )
+                            response_size = struct.unpack(">Q", response_size_buf)[0]
+                            remaining_bytes = response_size
+                        if remaining_bytes > 0:
+                            packet_data = client_socket.recv(
+                                min(remaining_bytes, 0x100000)
+                            )
+                            if len(packet_data) == 0:
+                                self._check_server_alive()
+                                break
+                            remaining_bytes -= len(packet_data)
+                            response_bytes.append(packet_data)
+                    except socket.timeout:
+                        continue
+                if time.time() >= deadline:
+                    self._check_server_alive()
+                    raise self._RequestTimeoutError()
+                try:
+                    response = json.loads((b"".join(response_bytes)).decode("utf-8"))
+                except json.decoder.JSONDecodeError as e:
+                    raise Sandbox.SandboxRuntimeException(
+                        f"Invalid response JSON: {e} ({repr(response_bytes)})"
+                    )
+                if "exception" in response:
+                    raise Sandbox._json_exception_decode(response["exception"])
+                return response
+            finally:
+                client_socket.close()
+
+        def code_eval(
+            self, language, code, max_runtime_seconds
+        ) -> subprocess.CompletedProcess:
+            """Run a single snippet of code."""
+            request_deadline = (
+                time.time()
+                + max_runtime_seconds
+                + Sandbox._TIMEOUT_SLACK_CODE_EVAL_REQUEST
+            )
+            try:
+                response = self._request(
+                    "code_eval",
+                    request_deadline,
+                    language=language,
+                    code=code,
+                    max_runtime_seconds=max_runtime_seconds,
+                )
+            except self._RequestTimeoutError:
+                raise Sandbox.ExecutionTimeoutError(
+                    code=code,
+                    returncode=126,
+                    cmd=[language],
+                    output=None,
+                    stderr=None,
+                )
+            except self._ServerDiedError:
+                raise Sandbox.InterruptedExecutionError(
+                    code=code,
+                    returncode=127,
+                    cmd=[language],
+                    output=None,
+                    stderr=None,
+                )
+            else:
+                return subprocess.CompletedProcess(
+                    args=response["args"],
+                    returncode=response["returncode"],
+                    stdout=response.get("stdout"),
+                    stderr=response.get("stderr"),
+                )
+
+        def copy_out(self):
+            self._request("copy_out", time.time() + Sandbox._TIMEOUT_SLACK_COPY_OUT)
+
+        def terminate(self):
+            self._request("terminate", time.time() + Sandbox._TIMEOUT_SLACK_TERMINATE)
+
     class SandboxException(Exception):
         """
         Base class for all exceptions generated by `Sandbox`.
@@ -2296,6 +2176,157 @@ class Sandbox:
         """
 
     @classmethod
+    def _json_exception_encode(cls, e):
+        exception_info = {
+            "name": e.__class__.__name__,
+            "str": str(e),
+        }
+        if isinstance(e, cls.SandboxException) or isinstance(e, cls.ExecutionError):
+            exception_info["args"] = e._sandbox_exception_args
+            exception_info["kwargs"] = e._sandbox_exception_kwargs
+        return exception_info
+
+    @classmethod
+    def _json_exception_decode(cls, exception_data):
+        """Returns a JSON-encoded exception."""
+        class_name = exception_data["name"]
+        found_class = None
+        for ex_class in (
+            cls.PlatformNotSupportedException,
+            cls.SandboxRuntimeException,
+            cls.CodeExecutionError,
+            cls.ExecutionTimeoutError,
+            cls.InterruptedExecutionError,
+            cls.GVisorNotInstalledException,
+            cls.CorruptDownloadException,
+            cls.EnvironmentNeedsSetupException,
+            cls.ExecutionError,
+            cls.SandboxException,
+        ):
+            if ex_class.__name__ == class_name:
+                found_class = ex_class
+                break
+        if found_class is None:
+            exception_str = exception_data["str"]
+            return cls.SandboxRuntimeException(f"{class_name}: {exception_str}")
+        return found_class(*exception_data["args"], **exception_data["kwargs"])
+
+    @classmethod
+    def _json_completed_process_decode(cls, result) -> subprocess.CompletedProcess:
+        """Decode a JSON-encoded subprocess.CompletedProcess."""
+        stdout = None
+        if result["stdout"] is not None:
+            stdout = base64.b64decode(result["stdout"])
+            if result["stdout_is_text"]:
+                stdout = stdout.decode("utf-8", errors="replace")
+        stderr = None
+        if result["stderr"] is not None:
+            stderr = base64.b64decode(result["stderr"])
+            if result["stderr_is_text"]:
+                stderr = stderr.decode("utf-8", errors="replace")
+        return subprocess.CompletedProcess(
+            args=result["args"],
+            returncode=result["returncode"],
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    @classmethod
+    def _json_completed_process_encode(cls, result: subprocess.CompletedProcess):
+        """Return a JSON-encoded subprocess.CompletedProcess."""
+        stdout = result.stdout
+        stdout_is_text = False
+        if stdout is not None and type(stdout) is not type(b""):
+            stdout = stdout.encode("utf-8", errors="replace")
+            stdout_is_text = True
+        stderr = result.stderr
+        stderr_is_text = False
+        if stderr is not None and type(stderr) is not type(b""):
+            stderr = stderr.encode("utf-8", errors="replace")
+            stderr_is_text = True
+        return {
+            "args": result.args,
+            "returncode": result.returncode,
+            "stdout": base64.b64encode(stdout).decode("utf-8")
+            if stdout is not None
+            else None,
+            "stdout_is_text": stdout_is_text,
+            "stderr": base64.b64encode(stderr).decode("utf-8")
+            if stderr is not None
+            else None,
+            "stderr_is_text": stderr_is_text,
+        }
+
+    @classmethod
+    def _concatenate_outputs(cls, streams, encoding="utf-8"):
+        """
+        Concatenate a list of byte or unicode strings to a single string.
+        Useful for merging stdout/stderr from multiple invocations.
+        """
+        is_all_text = True
+        all_text = []
+        for stream in streams:
+            if stream is None:
+                continue
+            if type(stream) is type(""):
+                all_text.append(stream)
+            elif type(stream) is type(b""):
+                try:
+                    text_stream = stream.decode(encoding, errors="strict")
+                except UnicodeDecodeError:
+                    is_all_text = False
+                    break
+                else:
+                    all_text.append(text_stream)
+            else:
+                raise cls.SandboxRuntimeException(
+                    f"Non-string passed to _concatenate_outputs: {type(stream)}"
+                )
+        if is_all_text:
+            return "".join(all_text)
+        all_bytes = []
+        for stream in streams:
+            if stream is None:
+                continue
+            if type(stream) is type(b""):
+                all_bytes.append(stream)
+            elif type(stream) is type(""):
+                all_bytes.append(stream.encode(encoding, errors="strict"))
+            else:
+                assert False, "Logic error"
+        return b"".join(all_bytes)
+
+    @classmethod
+    def _process_json_wrapped_result(
+        cls, result: subprocess.CompletedProcess
+    ) -> subprocess.CompletedProcess:
+        """
+        Process a `CompletedProcess` from a wrapped invocation.
+
+        :param result: A `CompletedProcess` with stdout captured.
+        :return: A synthetic `CompletedProcess` from the JSON information in stdout.
+        :raises Sandbox.SandboxRuntimeException: If the JSON information cannot be interpreted.
+        :raises Sandbox.SandboxException: For any exception that is forwarded.
+        """
+        if not result.stdout:
+            raise cls.SandboxRuntimeException(
+                f"Subprocess interpreter did not produce any output (stderr: {result.stderr})"
+            )
+        try:
+            output = json.loads(result.stdout)
+        except json.decoder.JSONDecodeError as e:
+            raise cls.SandboxRuntimeException(
+                f"Invalid process JSON data (stdout: {result.stdout}): {e}"
+            )
+        if "exception" in output:
+            raise cls._json_exception_decode(output["exception"])
+        if "result" not in output:
+            raise cls.SandboxRuntimeException(
+                f"Invalid response from subprocess: {output}"
+            )
+        return cls._json_completed_process_decode(output["result"])
+
+    @classmethod
     def check_platform(cls):
         """
         Verifies that this tool is running on a supported platform.
@@ -2346,54 +2377,6 @@ class Sandbox:
             raise cls.EnvironmentNeedsSetupException(
                 "cgroupfs does not have the 'memory' controller enabled, necessary to enforce memory limits; please enable it, or disable resource limiting if appropriate"
             )
-
-    @classmethod
-    def check_procfs(cls):
-        """
-        Verifies that we have an unobstructed view of procfs.
-
-        :return: Nothing.
-        :raises EnvironmentNeedsSetupException: If procfs is obstructed.
-        """
-        mount_infos = []
-        with open("/proc/self/mountinfo", "rb") as mountinfo_f:
-            for line in mountinfo_f:
-                line = line.decode("utf-8").strip()
-                if not line:
-                    continue
-                mount_components = line.split(" ")
-                if len(mount_components) < 10:
-                    continue
-                hyphen_index = mount_components.index("-")
-                if hyphen_index < 6:
-                    continue
-                mount_info = {
-                    "mount_path": mount_components[4],
-                    "path_within_mount": mount_components[3],
-                    "fs_type": mount_components[hyphen_index + 1],
-                }
-                mount_infos.append(mount_info)
-        procfs_mounts = frozenset(
-            m["mount_path"]
-            for m in mount_infos
-            if m["fs_type"] == "proc" and m["path_within_mount"] == "/"
-        )
-        if len(procfs_mounts) == 0:
-            raise cls.EnvironmentNeedsSetupException(
-                "procfs is not mounted; please mount it"
-            )
-        obstructed_procfs_mounts = set()
-        for mount_info in mount_infos:
-            for procfs_mount in procfs_mounts:
-                if mount_info["mount_path"].startswith(procfs_mount + os.sep):
-                    obstructed_procfs_mounts.add(procfs_mount)
-        for procfs_mount in procfs_mounts:
-            if procfs_mount not in obstructed_procfs_mounts:
-                return  # We have at least one unobstructed procfs view.
-        assert len(obstructed_procfs_mounts) > 0, "Logic error"
-        raise cls.EnvironmentNeedsSetupException(
-            "procfs is obstructed; please mount a new procfs mount somewhere in the container, e.g. /proc2 (`--mount=type=bind,source=/proc,target=/proc2,readonly=false,bind-recursive=disabled`)"
-        )
 
     @classmethod
     def unshare(cls, flags):
@@ -2522,7 +2505,6 @@ class Sandbox:
         cls.check_unshare()
         if require_resource_limiting:
             cls.check_cgroups()
-        cls.check_procfs()
         if not auto_install_allowed and cls.get_runsc_path() is None:
             raise cls.GVisorNotInstalledException(
                 "gVisor is not installed (runsc binary not found in $PATH); please install it or enable AUTO_INSTALL valve for auto installation"
@@ -2544,49 +2526,26 @@ class Sandbox:
         cls._SelfFile.init()
         if cls._MARKER_ENVIRONMENT_VARIABLE not in os.environ:
             return
+        result = None
+        output_stream = sys.stderr
         try:
             directives = json.load(sys.stdin)
             sandbox = cls(**directives["settings"])
             if directives["stage"] == cls._STAGE_SANDBOX:
-                result = sandbox._run()
-            elif directives["stage"] == cls._STAGE_SNIPPET:
-                result = sandbox._run_snippets()
+                output_stream = sys.stdout
+                result = cls._json_completed_process_encode(sandbox._run())
+            elif directives["stage"] == cls._STAGE_SERVER:
+                cls._InSandboxServer().run()
+                result = {}
             else:
                 raise ValueError(f"Invalid stage in directives: {directives}")
         except Exception as e:
-            exception_info = {
-                "name": e.__class__.__name__,
-                "str": str(e),
-            }
-            if isinstance(e, cls.SandboxException) or isinstance(e, cls.ExecutionError):
-                exception_info["args"] = e._sandbox_exception_args
-                exception_info["kwargs"] = e._sandbox_exception_kwargs
-            json.dump(
-                {
-                    "exception": exception_info,
-                },
-                sys.stdout,
-            )
+            json.dump({"exception": cls._json_exception_encode(e)}, output_stream)
         else:
-            stdout = result.stdout
-            if type(stdout) is not type(b""):
-                stdout = stdout.encode("utf-8", errors="replace")
-            stderr = result.stderr
-            if type(stderr) is not type(b""):
-                stderr = stderr.encode("utf-8", errors="replace")
-            json.dump(
-                {
-                    "result": {
-                        "args": result.args,
-                        "returncode": result.returncode,
-                        "stdout": base64.b64encode(stdout).decode("utf-8"),
-                        "stderr": base64.b64encode(stderr).decode("utf-8"),
-                    },
-                },
-                sys.stdout,
-            )
+            assert result is not None, "Logic error"
+            json.dump({"result": result}, output_stream)
         finally:
-            sys.stdout.flush()
+            output_stream.flush()
             sys.exit(0)
 
     def __init__(
@@ -2823,66 +2782,6 @@ class Sandbox:
         with open(os.path.join(self._bundle_path, "config.json"), "w") as bundle_f:
             json.dump(oci_config, bundle_f, indent=2, sort_keys=True)
 
-    def _process_json_wrapped_result(
-        self, result: subprocess.CompletedProcess
-    ) -> subprocess.CompletedProcess:
-        """
-        Process a `CompletedProcess` from a wrapped invocation.
-
-        :param result: A `CompletedProcess` with stdout captured.
-        :return: A synthetic `CompletedProcess` from the JSON information in stdout.
-        :raises Sandbox.SandboxRuntimeException: If the JSON information cannot be interpreted.
-        :raises Sandbox.SandboxException: For any exception that is forwarded.
-        """
-        if not result.stdout:
-            raise self.SandboxRuntimeException(
-                f"Subprocess interpreter did not produce any output (stderr: {result.stderr})"
-            )
-        try:
-            output = json.loads(result.stdout)
-        except json.decoder.JSONDecodeError as e:
-            raise self.SandboxRuntimeException(
-                f"Subprocess interpreter produced invalid JSON (stdout: {result.stdout}): {e}"
-            )
-        if "exception" in output:
-            class_name = output["exception"]["name"]
-            found_class = None
-            for ex_class in (
-                self.PlatformNotSupportedException,
-                self.SandboxRuntimeException,
-                self.CodeExecutionError,
-                self.ExecutionTimeoutError,
-                self.InterruptedExecutionError,
-                self.GVisorNotInstalledException,
-                self.CorruptDownloadException,
-                self.EnvironmentNeedsSetupException,
-                self.ExecutionError,
-                self.SandboxException,
-            ):
-                if ex_class.__name__ == class_name:
-                    found_class = ex_class
-                    break
-            if found_class is None:
-                exception_str = output["exception"]["str"]
-                raise self.SandboxRuntimeException(f"{class_name}: {exception_str}")
-            raise found_class(
-                *output["exception"]["args"], **output["exception"]["kwargs"]
-            )
-        if "result" not in output:
-            raise self.SandboxRuntimeException(
-                f"Invalid response from subprocess: {output}"
-            )
-        return subprocess.CompletedProcess(
-            args=output["result"]["args"],
-            returncode=output["result"]["returncode"],
-            stdout=base64.b64decode(output["result"]["stdout"]).decode(
-                "utf-8", errors="replace"
-            ),
-            stderr=base64.b64decode(output["result"]["stderr"]).decode(
-                "utf-8", errors="replace"
-            ),
-        )
-
     def _run(self) -> subprocess.CompletedProcess:
         """
         Spawn and wait for the sandbox. Runs in separate forked process.
@@ -2893,15 +2792,19 @@ class Sandbox:
         :raises Sandbox.InterruptedExecutionError: If the code interpreter died without providing a return code; usually due to running over resource limits.
         :raises sandbox.CodeExecutionError: If the code interpreter failed to execute the given code. This does not represent a sandbox failure.
         """
+        runsc = None
+        resource_monitor_cancel = None
+        runsc_memfd_stdout = None
+        runsc_memfd_stderr = None
         try:
             self._setup_sandbox()
-
             network_mode = "host" if self._networking_allowed else "none"
             runsc_argv = [
                 self.get_runsc_path(),
                 "--rootless=true",
                 "--directfs=false",
                 f"--network={network_mode}",
+                "--host-uds=all",
                 "--ignore-cgroups=true",  # We already took care of cgroups manually.
                 f"--root={self._runtime_root_path}",
                 f"--debug-log={self._logs_path}/",
@@ -2913,160 +2816,150 @@ class Sandbox:
             runsc_env["TMPDIR"] = self._gotmp_dir
             runsc_input = json.dumps(
                 {
-                    "stage": self._STAGE_SNIPPET,
+                    "stage": self._STAGE_SERVER,
                     "settings": self._settings,
                 }
             )
             started_marker_path = os.path.join(self._sandbox_shared_path, "started")
             resource_monitor_cancel = self._switcheroo.monitor_cgroup_resources()
+            memfd_uuid = str(uuid.uuid4())
+            runsc_memfd_stdout = os.fdopen(
+                os.memfd_create(f"runsc-stdout.{memfd_uuid}"), "wb+"
+            )
+            runsc_memfd_stderr = os.fdopen(
+                os.memfd_create(f"runsc-stderr.{memfd_uuid}"), "wb+"
+            )
             try:
-                result = subprocess.run(
+                runsc = subprocess.Popen(
                     runsc_argv,
                     env=runsc_env,
                     preexec_fn=self._switcheroo.move_process_to_sandbox_leaf_cgroup_lambda(),
-                    input=runsc_input,
+                    stdin=subprocess.PIPE,
+                    stdout=runsc_memfd_stdout,
+                    stderr=runsc_memfd_stderr,
                     text=True,
-                    capture_output=True,
-                    timeout=self._max_runtime_seconds + 3,
-                    check=True,
                 )
-            except subprocess.TimeoutExpired as e:
-                raise self.ExecutionTimeoutError(
-                    code="; ".join(
-                        f"({language}, {repr(code)}))"
-                        for language, code in self._snippets
-                    ),
-                    returncode=126,
-                    cmd=self._sandboxed_command,
-                    output=e.stdout,
-                    stderr=e.stderr,
+                runsc.stdin.write(runsc_input)
+                runsc.stdin.close()
+            except OSError as e:
+                raise self.SandboxRuntimeException(f"Spawn runsc: OSError: {e}")
+            except Exception as e:
+                raise self.SandboxRuntimeException(f"Spawn runsc: {e}")
+            sandbox_client = self._SandboxClient(
+                sandbox_shared_path=self._sandbox_shared_path, runsc_popen=runsc
+            )
+            overall_deadline = time.time() + self._max_runtime_seconds
+            overall_cmd = []
+            overall_code = []
+            overall_stdout = []
+            overall_stderr = []
+            for language, code in self._snippets:
+                overall_cmd.append(f"{language} /dev/stdin")
+                if len(self._snippets) == 1:
+                    overall_code = [code]
+                else:
+                    overall_code.append(f"({language}, {code})")
+                seconds_remaining = overall_deadline - time.time()
+                result = sandbox_client.code_eval(
+                    language=language,
+                    code=code,
+                    max_runtime_seconds=seconds_remaining,
                 )
-            except subprocess.CalledProcessError as e:
+                if result.stdout is not None:
+                    overall_stdout.append(result.stdout)
+                if result.stderr is not None:
+                    overall_stderr.append(result.stderr)
+            overall_stdout = self._concatenate_outputs(overall_stdout)
+            overall_stderr = self._concatenate_outputs(overall_stderr)
+            sandbox_client.copy_out()
+            sandbox_client.terminate()
+            runsc_stdout = None
+            runsc_stderr = None
+            try:
+                runsc.wait(timeout=self._TIMEOUT_SLACK_WAIT_FOR_SANDBOX_SHUTDOWN)
+            except subprocess.TimeoutExpired:
+                try:
+                    runsc.kill()
+                    runsc.wait(timeout=self._TIMEOUT_SLACK_WAIT_FOR_SANDBOX_SHUTDOWN)
+                except Exception:
+                    pass
+            if runsc.poll() is None:
+                raise self.SandboxRuntimeException("Sandbox did not terminate")
+            if runsc.returncode != 0:
                 if os.path.isfile(started_marker_path):
                     raise self.InterruptedExecutionError(
-                        code="; ".join(
-                            f"({language}, {repr(code)}))"
-                            for language, code in self._snippets
-                        ),
+                        code="; ".join(overall_code),
                         returncode=127,
                         cmd=self._sandboxed_command,
-                        output=e.stdout,
-                        stderr=e.stderr,
+                        output=overall_stdout,
+                        stderr=overall_stderr,
                     )
                 logs = {}
 
                 def process_log(filename, log_line):
-                    if self._debug or (
-                        log_line and log_line[0] in "WEF"
-                    ):  # Warning, Error, Fatal
+                    if (
+                        self._debug
+                        or not filename.endswith(".txt")  # Not a gVisor log file
+                        or (  # gVisor log file
+                            log_line
+                            and log_line[0] in "WEF"  # WEF: Warning, Error, Fatal
+                        )
+                    ):
                         if filename not in logs:
                             logs[filename] = []
                         logs[filename].append(log_line)
 
                 self.debug_logs(process_log)
-                stderr = e.stderr.strip()
                 json_logs = json.dumps(logs)
+                try:
+                    runsc_memfd_stdout.seek(0)
+                    runsc_stdout = runsc_memfd_stdout.read()
+                    runsc_memfd_stderr.seek(0)
+                    runsc_stderr = runsc_memfd_stderr.read()
+                    runsc_output = (
+                        (runsc_stdout + runsc_stderr)
+                        .strip()
+                        .decode("utf-8", errors="ignore")
+                    )
+                except Exception as e:
+                    runsc_output = f"[cannot get output: {e}]"
                 if self._debug:
                     raise self.SandboxRuntimeException(
-                        f"Sandbox failed to start: {e}; stderr: {stderr}; logs: {json_logs}"
+                        f"Sandbox failed to start: {runsc.returncode}; runsc: {runsc_output}; logs: {json_logs}"
                     )
                 raise self.SandboxRuntimeException(
-                    f"Sandbox failed to start: {e} (turn on debug mode to see more information); stderr: {stderr}; logs: {json_logs}"
+                    f"Sandbox failed to start: {runsc.returncode}; (turn on debug mode to see more information); runsc: {runsc_output}; logs: {json_logs}"
                 )
-            finally:
-                resource_monitor_cancel()
             if not os.path.isfile(started_marker_path):
-                raise self.SandboxRuntimeException(
-                    "Sandbox failed to start up properly"
-                )
-            return self._process_json_wrapped_result(result)
+                raise self.SandboxRuntimeException("Sandbox failed to start up")
+            if len(overall_cmd) == 1:
+                overall_args = overall_cmd[0]
+            else:
+                overall_args = ["sh", "-c", "; ".join(overall_cmd)]
+            return subprocess.CompletedProcess(
+                args=overall_args,
+                returncode=0,
+                stdout=overall_stdout,
+                stderr=overall_stderr,
+            )
         finally:
+            if runsc_memfd_stdout is not None:
+                runsc_memfd_stdout.close()
+            if runsc_memfd_stderr is not None:
+                runsc_memfd_stderr.close()
+            if resource_monitor_cancel is not None:
+                resource_monitor_cancel()
+            if runsc is not None:
+                try:
+                    runsc.kill()
+                    try:
+                        runsc.wait(timeout=0.1)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
             if self._switcheroo is not None:
                 self._switcheroo.cleanup()
-
-    def _run_snippets(self):
-        """
-        Run all snippets in the sandbox.
-        This code is called from *within* the gVisor sandbox.
-        """
-        with open("/sandbox/started", "wb") as started_f:
-            started_f.write(b"OK\n")
-        deadline = time.time() + self._max_runtime_seconds
-        last_result = None
-        overall_args = []
-        overall_stdout = ""
-        overall_stderr = ""
-        if len(self._snippets) == 0:
-            raise self.SandboxRuntimeException("No code snippets to run")
-        for snippet in self._snippets:
-            if len(snippet) != 2:
-                raise self.SandboxRuntimeException(f"Invalid snippet: {snippet}")
-            language, code = snippet
-            if language not in self.SUPPORTED_LANGUAGES:
-                raise self.SandboxRuntimeException(f"Unsupported language: {language}")
-            interpreter_path = None
-            if language == self.LANGUAGE_BASH:
-                interpreter_path = shutil.which("bash")
-            elif language == self.LANGUAGE_PYTHON:
-                interpreter_path = sys.executable
-            if interpreter_path is None:
-                raise self.SandboxRuntimeException(
-                    f"Cannot find interpreter for language: {language}"
-                )
-            cmd = [interpreter_path, "/dev/stdin"]
-            overall_args.append(" ".join(cmd))
-            snippet_timeout = deadline - time.time()
-            if snippet_timeout <= 0.0:
-                raise self.ExecutionTimeoutError(
-                    f"Code executed the deadline of {self._max_runtime_seconds} seconds"
-                )
-            try:
-                snippet_result = subprocess.run(
-                    cmd,
-                    input=code + "\n",
-                    text=True,
-                    capture_output=True,
-                    timeout=snippet_timeout,
-                    check=True,
-                )
-            except subprocess.TimeoutExpired as e:
-                overall_stdout += e.stdout or ""
-                overall_stderr += e.stderr or ""
-                raise self.ExecutionTimeoutError(
-                    code=code,
-                    returncode=126,
-                    cmd=["sh", "-c", "; ".join(overall_args)],
-                    output=overall_stdout,
-                    stderr=overall_stderr,
-                )
-            except subprocess.CalledProcessError as e:
-                overall_stdout += e.stdout or ""
-                overall_stderr += e.stderr or ""
-                raise self.CodeExecutionError(
-                    code=code,
-                    returncode=e.returncode,
-                    cmd=["sh", "-c", "; ".join(overall_args)],
-                    output=overall_stdout,
-                    stderr=overall_stderr,
-                )
-            else:
-                last_result = snippet_result
-                overall_stdout += snippet_result.stdout or ""
-                overall_stderr += snippet_result.stderr or ""
-        assert last_result is not None, "Logic error"
-        if os.path.isdir("/sandbox/persistent"):
-            shutil.copytree(
-                "/home/user",
-                "/sandbox/persistent",
-                ignore_dangling_symlinks=True,
-                dirs_exist_ok=True,
-            )
-        return subprocess.CompletedProcess(
-            args=["sh", "-c", "; ".join(overall_args)],
-            returncode=0,
-            stdout=overall_stdout,
-            stderr=overall_stderr,
-        )
 
     def run(self) -> subprocess.CompletedProcess:
         """
@@ -3174,6 +3067,475 @@ class Sandbox:
 
 
 Sandbox.main()
+
+
+class UserStorage:
+    class StorageException(Exception):
+        """Base class for storage-related exceptions."""
+
+    class OutOfStorageException(Exception):
+        """Not enough files or bytes quota."""
+
+    class EnvironmentNeedsSetupException(Exception):
+        """Storage is badly configured."""
+
+    # Number of zeroes to use in nonces (in per-day storage directories).
+    # This effectively limits the number of nonces usable in a given day.
+    NUM_NONCE_ZEROS = 4
+
+    # Free space buffer to keep free on the underlying storage device,
+    # rather than allowing user storage to fill it to the brim.
+    MUST_KEEP_FREE_MARGIN_MEGABYTES = 512
+
+    class File:
+        MAX_INLINE_URL_SIZE = 0
+        MAX_INLINE_TEXT_LINES = 128
+        MAX_INLINE_TEXT_BYTES = 65535
+
+        def __init__(self, file_path, file_relative_path, file_url, file_size):
+            self._file_path = file_path
+            self._file_relative_path = file_relative_path
+            self._file_url = file_url
+            self._size_bytes = file_size
+            mimetypes.init()
+            mime_type, _ = mimetypes.guess_type(file_path)
+            if mime_type is None:
+                mime_type, _ = mimetypes.guess_type(file_url)
+            if mime_type is None:
+                # Check if the file is valid UTF-8 text.
+                is_utf8 = True
+                is_empty = True
+                with open(self._file_path, "rb") as f:
+                    for line in f:
+                        is_empty = is_empty or len(line) > 0
+                        try:
+                            line.decode("utf-8")
+                        except UnicodeDecodeError:
+                            is_utf8 = False
+                mime_type = (
+                    "text/plain"
+                    if (is_utf8 and not is_empty)
+                    else "application/octet-stream"
+                )
+            self._mime_type = mime_type
+            self._cached_markdown = None
+
+        @property
+        def name(self):
+            return self._file_relative_path
+
+        @property
+        def url(self):
+            if self._size_bytes > 0 and self._size_bytes <= self.MAX_INLINE_URL_SIZE:
+                # Try to use an inline URL.
+                with open(self._file_path, "rb") as f:
+                    contents = f.read()
+                inline_url = f"data:{self._mime_type}," + urllib.parse.quote_from_bytes(
+                    contents
+                )
+                inline_base64 = (
+                    f"data:{self._mime_type};base64,"
+                    + base64.standard_b64encode(contents).decode("ascii")
+                )
+                shortest_url = (
+                    inline_url
+                    if len(inline_url) < len(inline_base64)
+                    else inline_base64
+                )
+                if len(shortest_url) <= self.MAX_INLINE_URL_SIZE:
+                    return shortest_url
+            return self._file_url
+
+        def _inline_markdown(self):
+            """Render the file as inline text or markdown if small enough; otherwise return None."""
+            if self._size_bytes > self.MAX_INLINE_TEXT_BYTES:
+                return None
+            if self._mime_type.startswith("image/"):
+                return f"\U0001f5bc [{self.name}]({self.url}):  \n![{self.name}]({self.url})"
+            if not self._mime_type.startswith("text/"):
+                return None
+            with open(self._file_path, "rb") as f:
+                try:
+                    contents = f.read().decode("utf-8")
+                except UnicodeDecodeError:
+                    return None
+            lines = contents.split("\n")
+            if len(lines) > self.MAX_INLINE_TEXT_LINES:
+                return None
+            if self._mime_type != "text/markdown":
+                if "```" in contents:
+                    return None
+                if contents and contents[-1] == "\n":
+                    contents = contents[:-1]
+                return f"\U0001f4c4 [{self.name}]({self.url}):\n```\n{contents}\n```"
+            components = [f"\U0001f4c3 [{self.name}]({self.url}):"]
+            for line in lines:
+                components.append(f"> {line}")
+            if components[-1] == "> ":
+                components = components[:-1]
+            return "\n".join(components)
+
+        def _markdown(self):
+            if self._size_bytes == 0:
+                return f"\u2049 `{self.name}` (empty)"
+            inline_markdown = self._inline_markdown()
+            if inline_markdown is not None:
+                return inline_markdown
+            icon = "\U0001f4be"
+            if self._mime_type.startswith("text/"):
+                icon = "\U0001f4c4"
+            elif self._mime_type.startswith("image/"):
+                icon = "\U0001f5bc"
+            elif self._mime_type.startswith("audio/"):
+                icon = "\U0001f3b5"
+            elif self._mime_type.startswith("video/"):
+                icon = "\U0001f3ac"
+            size = f"{self._size_bytes} bytes"
+            if self._size_bytes > 1024 * 1024 * 1024:
+                size = f"{self._size_bytes // 1024 // 1024 // 1024} GiB"
+            elif self._size_bytes > 1024 * 1024:
+                size = f"{self._size_bytes // 1024 // 1024} MiB"
+            elif self._size_bytes > 1024:
+                size = f"{self._size_bytes // 1024} KiB"
+            return f"{icon} [{self.name}]({self.url}) ({size})"
+
+        def markdown(self):
+            if self._cached_markdown is None:
+                self._cached_markdown = self._markdown()
+            return self._cached_markdown
+
+    @classmethod
+    def measure_directory(cls, path, predicate=None):
+        """
+        Measure storage cost of a directory.
+
+        :param path: Path to the directory to measure.
+        :param predicate: Optional predicate to filter files and directories, called with absolute paths.
+        :return: 2-tuple `(total_files, total_bytes)`. Note that `total_files` counts the number of non-root directories as well, and `total_bytes` also includes storage necessary to store filenames and directory names.
+        """
+        path = os.path.normpath(os.path.abspath(path))
+        total_files = 0
+        total_bytes = 0
+        try:
+            for dirpath, subdirs, subfiles in os.walk(
+                path, onerror=None, followlinks=False
+            ):
+                dirpath = os.path.normpath(os.path.abspath(dirpath))
+                for subdir in subdirs:
+                    if predicate is None or predicate(os.path.join(dirpath, subdir)):
+                        total_files += 1
+                        total_bytes += len(subdir)
+                for subfile in subfiles:
+                    subfile_path = os.path.join(dirpath, subfile)
+                    if predicate is not None and not predicate(subfile_path):
+                        continue
+                    try:
+                        subfile_stat = os.stat(subfile_path, follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue  # Likely raced with another execution.
+                    if not stat.S_ISREG(subfile_stat.st_mode):
+                        continue  # Ignore non-regular files.
+                    total_files += 1
+                    total_bytes += len(subfile)
+                    total_bytes += subfile_stat.st_size
+        except OSError as e:
+            raise cls.EnvironmentNeedsSetupException(
+                f"Failed to explore directory {path} (please adjust permissions): {e}"
+            )
+        return total_files, total_bytes
+
+    def __init__(
+        self,
+        storage_root_path,
+        storage_root_url,
+        __user__: typing.Optional[dict] = None,
+        max_files_per_user=None,
+        max_bytes_per_user=None,
+    ):
+        if storage_root_path.startswith("$DATA_DIR" + os.sep):
+            if "DATA_DIR" not in os.environ:
+                data_dir = "/app/backend/data"
+                if not os.path.isdir(data_dir):
+                    if os.path.isdir("/app/backend"):
+                        os.makedirs(data_dir, mode=0o755)
+                    else:
+                        raise self.EnvironmentNeedsSetupException(
+                            f"DATA_DIR specified in user storage configuration ({storage_root_path}), but not specified in environment, and default path '/app/backend/data' does not exist; please create it or configure user storage directory."
+                        )
+            else:
+                data_dir = os.environ["DATA_DIR"]
+            storage_root_path = os.path.join(
+                data_dir,
+                storage_root_path[len("$DATA_DIR" + os.sep) :].lstrip(os.sep),
+            )
+        self._storage_root_path = os.path.normpath(os.path.abspath(storage_root_path))
+        try:
+            os.makedirs(self._storage_root_path, mode=0o755, exist_ok=True)
+        except OSError as e:
+            raise self.EnvironmentNeedsSetupException(
+                f"User storage directory ({self._storage_root_path}) does not exist and cannot automatically create it ({e}); please create it or reconfigure it."
+            )
+        self._storage_root_url = storage_root_url.rstrip("/")
+        self._date = time.strftime("%Y/%m/%d")
+        self._max_files_per_user = max_files_per_user
+        self._max_bytes_per_user = max_bytes_per_user
+        self._user = f"anon_{self._date}"
+        if __user__ is not None:
+            if type(__user__) is type({}):
+                self._user = str(
+                    "|".join(
+                        f"{k}={v}"
+                        for k, v in sorted(__user__.items(), key=lambda x: x[0])
+                    )
+                )
+            else:
+                self._user = str(__user__)
+        user_hash = hashlib.sha512()
+        user_hash.update(self._user.encode("utf-8"))
+        self._user_hash = (
+            base64.b32encode(user_hash.digest()).decode("ascii").lower()[:12]
+        )
+        self._user_path = os.path.join(storage_root_path, self._user_hash)
+        self._lock_fd = None
+
+    def __enter__(self):
+        assert self._lock_fd is None
+        os.makedirs(self._user_path, mode=0o755, exist_ok=True)
+        lock_fd = os.open(
+            os.path.join(self._user_path, ".lock"),
+            os.O_RDWR | os.O_CREAT | os.O_TRUNC,
+        )
+        deadline = time.time() + 10
+        last_exception = None
+        while time.time() < deadline:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except (IOError, OSError) as e:
+                last_exception = e
+                time.sleep(0.01)
+            else:
+                self._lock_fd = lock_fd
+                break
+        if self._lock_fd is None:
+            os.close(lock_fd)
+            raise self.StorageException(
+                f"Cannot lock storage directory (too many concurrent code executions?) {last_exception}"
+            )
+
+    def __exit__(self, *args, **kwargs):
+        assert self._lock_fd is not None
+        fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+        os.close(self._lock_fd)
+        self._lock_fd = None
+
+    def _is_user_file(self, path):
+        """Used as predicate when measuring user storage directories."""
+        assert path.startswith(self._user_path + os.sep)
+        path = path[len(self._user_path) + len(os.sep) :]
+        # User files are under:
+        # YYYY/MM/DD/NONCE/HASH (5 levels of nesting).
+        # So a real user file has at least 6 components, which means it
+        # must have at least 5 slashes.
+        return path.count(os.sep) >= 5
+
+    def copy(self, __id__, intake_path):
+        """
+        Copy a directory to user storage.
+        Ensure that the user storage has room for the given number of files totaling the given number of bytes.
+        If this is feasible by deleting previous user files, it will do so.
+        Must be done while holding the lock.
+
+        :param __id__: Chat or action ID.
+        :param intake_path: Path to a directory that should be copied to the user storage.
+        :raises OutOfStorageException: If there is not enough available file or bytes quota.
+        :return: A list of `File`s from each file copied from `intake_path`.
+        """
+        assert (
+            self._lock_fd is not None
+        ), "Cannot perform this operation without holding the lock"
+        want_num_files, want_num_bytes = self.measure_directory(intake_path)
+        if want_num_files == 0:
+            return ()  # Nothing to copy.
+        if self._max_files_per_user <= want_num_files:
+            raise self.OutOfStorageException(
+                f"Cannot allocate storage for {want_num_files} files; maximum is {self._max_files_per_user} files per user"
+            )
+        if self._max_bytes_per_user <= want_num_bytes:
+            raise self.OutOfStorageException(
+                f"Cannot allocate storage for {want_num_bytes} bytes; maximum is {self._max_bytes_per_user} bytes per user"
+            )
+        disk_usage_free = shutil.disk_usage(self._user_path).free
+        if (
+            disk_usage_free
+            <= want_num_bytes + self.MUST_KEEP_FREE_MARGIN_MEGABYTES * 1024 * 1024
+        ):
+            raise self.OutOfStorageException(
+                f"Not enough free disk space for {want_num_bytes} bytes; current free space is {disk_usage_free} bytes and must keep at least {self.MUST_KEEP_FREE_MARGIN_MEGABYTES} megabytes free"
+            )
+        user_root_num_files, user_root_num_bytes = self.measure_directory(
+            self._user_path,
+            predicate=self._is_user_file,
+        )
+        user_root_remaining_files = self._max_files_per_user - user_root_num_files
+        user_root_remaining_bytes = self._max_bytes_per_user - user_root_num_bytes
+        while (
+            user_root_remaining_files < want_num_files
+            or user_root_remaining_bytes < want_num_bytes
+        ):
+            oldest_directory = None
+            try:
+                oldest_yyyy = next(
+                    iter(
+                        sorted(
+                            f
+                            for f in os.listdir(self._user_path)
+                            if len(f) >= 4 and f.isdigit()
+                        )
+                    )
+                )
+                oldest_mm = next(
+                    iter(
+                        sorted(
+                            f
+                            for f in os.listdir(
+                                os.path.join(self._user_path, oldest_yyyy)
+                            )
+                            if len(f) == 2 and f.isdigit()
+                        )
+                    )
+                )
+                oldest_dd = next(
+                    iter(
+                        sorted(
+                            f
+                            for f in os.listdir(
+                                os.path.join(self._user_path, oldest_yyyy, oldest_mm)
+                            )
+                            if len(f) == 2 and f.isdigit()
+                        )
+                    )
+                )
+                oldest_nonce = next(
+                    iter(
+                        sorted(
+                            f
+                            for f in os.listdir(
+                                os.path.join(
+                                    self._user_path,
+                                    oldest_yyyy,
+                                    oldest_mm,
+                                    oldest_dd,
+                                )
+                            )
+                            if len(f) == self.NUM_NONCE_ZEROS and f.isdigit()
+                        )
+                    )
+                )
+                oldest_directory = os.path.join(
+                    self._user_path, oldest_yyyy, oldest_mm, oldest_dd, oldest_nonce
+                )
+            except StopIteration:
+                raise self.OutOfStorageException(
+                    f"Cannot find directory to clear in order to make enough room for new user storage ({want_num_files} files, {want_num_bytes} bytes)"
+                )
+            assert oldest_directory is not None
+            if not shutil.rmtree.avoids_symlink_attacks:
+                raise self.EnvironmentNeedsSetupException(
+                    "Only supported on platforms with symlink-attack-resistant rmtree implementations"
+                )
+            shutil.rmtree(oldest_directory)
+            for parent_directory in (
+                os.path.join(self._user_path, oldest_yyyy, oldest_mm, oldest_dd),
+                os.path.join(self._user_path, oldest_yyyy, oldest_mm),
+                os.path.join(self._user_path, oldest_yyyy),
+            ):
+                if len(os.listdir(parent_directory)) == 0:
+                    os.rmdir(parent_directory)
+            user_root_num_files, user_root_num_bytes = self.measure_directory(
+                self._user_path,
+                predicate=self._is_user_file,
+            )
+            user_root_remaining_files = self._max_files_per_user - user_root_num_files
+            user_root_remaining_bytes = self._max_bytes_per_user - user_root_num_bytes
+
+        # We now have enough. Find new directory name.
+        path_with_counter = None
+        max_nonce = 10**self.NUM_NONCE_ZEROS - 1
+        for nonce in range(1, min(self._max_files_per_user or max_nonce, max_nonce)):
+            path_with_counter = os.path.join(
+                self._user_path, self._date, str(nonce).zfill(self.NUM_NONCE_ZEROS)
+            )
+            try:
+                os.makedirs(path_with_counter, mode=0o755, exist_ok=False)
+            except FileExistsError:
+                pass
+            else:
+                break
+        if path_with_counter is None:
+            raise self.OutOfStorageException("No free storage directory available!")
+        id_str = str(__id__) if __id__ is not None else self._date
+        id_hash = hashlib.sha512()
+        id_hash.update(self._user.encode("utf-8"))
+        id_hash.update(b"||||")
+        id_hash.update(self._date.encode("utf-8"))
+        id_hash.update(b"||||")
+        id_hash.update(path_with_counter.encode("utf-8"))
+        id_hash.update(b"||||")
+        id_hash.update(str(uuid.uuid4()).encode("utf-8"))
+        id_hash.update(b"||||")
+        id_hash.update(id_str.encode("utf-8"))
+        id_hash_component = (
+            base64.b32encode(id_hash.digest()).decode("ascii").lower()[:12]
+        )
+        final_path = os.path.normpath(
+            os.path.abspath(os.path.join(path_with_counter, id_hash_component))
+        )
+
+        # Now do the copy.
+        # This doesn't use `shutil.copytree` because we explicitly avoid copying anything but regular files.
+        user_files = []
+        for dirpath, subdirs, subfiles in os.walk(
+            intake_path, onerror=None, followlinks=False
+        ):
+            dirpath = os.path.normpath(os.path.abspath(dirpath))
+            relative_dirpath = None
+            if dirpath == intake_path:
+                relative_dirpath = "."
+            elif dirpath.startswith(intake_path + os.sep):
+                relative_dirpath = dirpath[len(intake_path) + len(os.sep) :]
+            else:
+                assert False, f"Bad traversal: expected all paths to starts with {intake_path} but got path that does not: {dirpath}"
+            assert relative_dirpath is not None
+            assert not os.path.isabs(relative_dirpath)
+            copy_dirpath = os.path.join(final_path, relative_dirpath)
+            os.makedirs(copy_dirpath, mode=0o755, exist_ok=True)
+            for subfile in subfiles:
+                subfile_path = os.path.join(dirpath, subfile)
+                subfile_relative_path = os.path.normpath(
+                    os.path.join(relative_dirpath, subfile)
+                )
+                assert not os.path.isabs(subfile_relative_path)
+                subfile_stat = os.stat(subfile_path, follow_symlinks=False)
+                if not stat.S_ISREG(subfile_stat.st_mode):
+                    continue  # Ignore non-regular files.
+                subfile_copy = os.path.join(copy_dirpath, subfile)
+                assert subfile_copy.startswith(self._storage_root_path + os.sep)
+                subfile_url = f"{self._storage_root_url}/" + urllib.parse.quote(
+                    subfile_copy[len(self._storage_root_path) + len(os.sep) :],
+                    safe=os.sep,
+                )
+                shutil.move(subfile_path, subfile_copy, copy_function=shutil.copy)
+                user_files.append(
+                    self.File(
+                        file_path=subfile_copy,
+                        file_relative_path=subfile_relative_path,
+                        file_url=subfile_url,
+                        file_size=subfile_stat.st_size,
+                    )
+                )
+
+        # We are done.
+        return user_files
 
 
 class UpdateCheck:
@@ -3332,7 +3694,7 @@ _SAMPLE_PYTHON_INSTRUCTIONS = (
 )
 
 
-def _do_self_tests(debug):
+def _do_self_tests(debug, filter=""):
     user_storage_path = None
 
     def _want_generated_files(want_generated_files):
@@ -3510,12 +3872,12 @@ def _do_self_tests(debug):
             "name": "generated_text_files_too_large_to_render",
             "language": "bash",
             "code": (
-                f"yes boop | head -{_Action._UserFile.MAX_INLINE_TEXT_LINES-1} > ok_lines.md",
-                f"yes boop | head -{_Action._UserFile.MAX_INLINE_TEXT_LINES-1} > ok_lines.txt",
-                f"yes boop | head -{_Action._UserFile.MAX_INLINE_TEXT_LINES+1} > too_many_lines.md",
-                f"yes boop | head -{_Action._UserFile.MAX_INLINE_TEXT_LINES+1} > too_many_lines.txt",
-                f"yes boop | tr '\\n' ' ' | head -c{_Action._UserFile.MAX_INLINE_TEXT_BYTES-1} > ok_bytes.txt",
-                f"yes boop | tr '\\n' ' ' | head -c{_Action._UserFile.MAX_INLINE_TEXT_BYTES+1} > too_many_bytes.txt",
+                f"yes boop | head -{UserStorage.File.MAX_INLINE_TEXT_LINES-1} > ok_lines.md",
+                f"yes boop | head -{UserStorage.File.MAX_INLINE_TEXT_LINES-1} > ok_lines.txt",
+                f"yes boop | head -{UserStorage.File.MAX_INLINE_TEXT_LINES+1} > too_many_lines.md",
+                f"yes boop | head -{UserStorage.File.MAX_INLINE_TEXT_LINES+1} > too_many_lines.txt",
+                f"yes boop | tr '\\n' ' ' | head -c{UserStorage.File.MAX_INLINE_TEXT_BYTES-1} > ok_bytes.txt",
+                f"yes boop | tr '\\n' ' ' | head -c{UserStorage.File.MAX_INLINE_TEXT_BYTES+1} > too_many_bytes.txt",
             ),
             "status": "OK",
             "generated_files": {
@@ -3622,6 +3984,7 @@ def _do_self_tests(debug):
                 print(f"    {stderr_line}")
 
     success = True
+    ran_at_least_one = False
 
     with tempfile.TemporaryDirectory(prefix="sandbox_self_test") as tmp_dir:
         user_storage_path = os.path.join(tmp_dir, "user_storage")
@@ -3629,8 +3992,12 @@ def _do_self_tests(debug):
         valve_name_prefix = (
             _Action.Valves()._VALVE_OVERRIDE_ENVIRONMENT_VARIABLE_NAME_PREFIX
         )
+        ran_at_least_one = False
         for self_test in _self_tests:
             name = self_test["name"]
+            if filter and name != filter:
+                continue
+            ran_at_least_one = True
             language = self_test["language"]
             code = "\n".join(self_test["code"]) + "\n"
             want_status = self_test["status"]
@@ -3725,6 +4092,9 @@ def _do_self_tests(debug):
                             )
                         else:
                             print(f"\u2714 Self-test {name} passed.", file=sys.stderr)
+    if not ran_at_least_one:
+        print("\u2620 No tests were ran.", file=sys.stderr)
+        sys.exit(1)
     if success:
         print("\u2705 All function self-tests passed, good go to!", file=sys.stderr)
         sys.exit(0)
@@ -3758,6 +4128,12 @@ if __name__ == "__main__":
         help="Run series of self-tests.",
     )
     parser.add_argument(
+        "--self_test_filter",
+        type=str,
+        default="",
+        help="If set, run only this self-test.",
+    )
+    parser.add_argument(
         "--debug", action="store_true", default=False, help="Enable debug mode."
     )
     parser.add_argument(
@@ -3774,7 +4150,7 @@ if __name__ == "__main__":
         ] = "true"
 
     if args.self_test:
-        _do_self_tests(args.debug)
+        _do_self_tests(debug=args.debug, filter=args.self_test_filter)
 
     if args.use_sample_code:
         if args.language == "bash":
